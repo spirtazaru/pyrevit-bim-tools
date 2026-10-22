@@ -188,6 +188,8 @@ def extract_keyword(ws_name, fallback=False):
         return CUSTOM_RULES[ws_name].upper()
     cleaned = re.sub(u"связь", u"", ws_name, flags=re.IGNORECASE | re.UNICODE)
     cleaned = cleaned.replace(u"!", u"").strip()
+    # Числовой префикс стандарта «00_Связь_<ключ>»: «00__АР» -> «__АР» (дальше разделители отрезаются)
+    cleaned = re.sub(r'^\d+(?=[^a-zA-Zа-яА-ЯёЁ0-9])', u'', cleaned, flags=re.UNICODE)
     cleaned = re.sub(r'^[^a-zA-Zа-яА-ЯёЁ0-9]+', u'', cleaned, flags=re.UNICODE)
     cleaned = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9]+$', u'', cleaned, flags=re.UNICODE)
     if cleaned:
@@ -1139,11 +1141,16 @@ def scan_links(d, worksets):
             if keyword_found_in_name(kw, upper):
                 target = ws
                 break
+        # У типа связи свой рабочий набор (от него зависит загрузка связи) — проверяем и его
+        link_type = d.GetElement(link.GetTypeId())
+        type_ws = link_type.WorksetId if link_type is not None else None
         if target is None:
             st.rows.append(LinkRow(link.Id, name, u"Связь RVT", cur_name, u"Правило не найдено", None, 'warn', u"Нет правила"))
-        elif id_int(link.WorksetId) == id_int(target.Id):
+        elif id_int(link.WorksetId) == id_int(target.Id) and (type_ws is None or id_int(type_ws) == id_int(target.Id)):
             st.rows.append(LinkRow(link.Id, name, u"Связь RVT", cur_name, target.Name, target.Id, 'ok', u"В своём РН"))
         else:
+            if type_ws is not None and id_int(type_ws) != id_int(link.WorksetId):
+                cur_name = u"{} (тип: {})".format(cur_name, ws_name_of(d, type_ws, names_by_id))
             st.rows.append(LinkRow(link.Id, name, u"Связь RVT", cur_name, target.Name, target.Id, 'err', u"Ошибка РН"))
             st.err_count += 1
 
@@ -1182,7 +1189,14 @@ def fix_links_and_levels(d, st):
         for row in st.rows:
             if row.Kind == 'err' and row.RevitId is not None and row.TargetWsId is not None:
                 el = d.GetElement(row.RevitId)
-                if el is not None and set_element_workset(el, id_int(row.TargetWsId)):
+                ws_int = id_int(row.TargetWsId)
+                targets = [el] if el is not None else []
+                if isinstance(el, DB.RevitLinkInstance):
+                    link_type = d.GetElement(el.GetTypeId())
+                    if link_type is not None:
+                        targets.append(link_type)   # экземпляр и тип связи — в один РН
+                moved = [x for x in targets if id_int(x.WorksetId) == ws_int or set_element_workset(x, ws_int)]
+                if targets and len(moved) == len(targets):
                     fixed += 1
                 else:
                     failed += 1
@@ -3199,6 +3213,14 @@ class ActionEventHandler(IExternalEventHandler):
     def Execute(self, uiapp):
         if self.window is None or not self.action:
             return
+        # Окно работает только со своей моделью: если пользователь переключился на другую — не выполняем
+        uidoc_active = uiapp.ActiveUIDocument
+        active = uidoc_active.Document if uidoc_active is not None else None
+        if active is None or not active.Equals(self.window.doc):
+            show_message(u"Окно аудита открыто для модели «{}», а сейчас активна «{}». "
+                         u"Перейдите в эту модель или запустите аудит заново из нужной.".format(
+                             self.window.doc.Title, active.Title if active is not None else u"—"))
+            return
         try:
             self.window.run_revit_action(self.action, self.payload)
         except Exception as ex:
@@ -3213,6 +3235,7 @@ class ActionEventHandler(IExternalEventHandler):
 # ==========================================================
 class AuditWindow(object):
     def __init__(self):
+        self.doc = doc   # модель, для которой открыто окно
         self.win = XamlReader.Parse(XAML_UI)
         global dialog_owner
         dialog_owner = self.win
@@ -3227,6 +3250,11 @@ class AuditWindow(object):
         self.ext_event = ExternalEvent.Create(self.ext_handler)
 
         self._bind_controls()
+
+        # Модель закрывается — закрываем и окно, иначе его кнопки обратятся к закрытому документу
+        self.win.Closed += self.on_window_closed
+        self._doc_closing_handler = self.on_document_closing   # тот же объект нужен для отписки
+        __revit__.Application.DocumentClosing += self._doc_closing_handler
 
         self.worksets = []
         self.names_by_id = {}
@@ -4007,6 +4035,24 @@ class AuditWindow(object):
             self.refresh_health_view()
             show_message(u"Удалено выбранных элементов: {}\nЗащищено системой / не удалено: {}".format(deleted, failed), kind='info')
 
+    def on_document_closing(self, sender, args):
+        try:
+            if args.Document.Equals(self.doc):
+                self.win.Close()
+        except Exception:
+            pass
+
+    def on_window_closed(self, sender, e):
+        try:
+            __revit__.Application.DocumentClosing -= self._doc_closing_handler
+        except Exception:
+            pass
+        try:
+            if System.AppDomain.CurrentDomain.GetData(APP_KEY) is self:
+                System.AppDomain.CurrentDomain.SetData(APP_KEY, None)
+        except Exception:
+            pass
+
     def show(self):
         self.win.Show()
 
@@ -4014,8 +4060,30 @@ class AuditWindow(object):
 # ==========================================================
 # 7. ЗАПУСК ПЛАГИНА
 # ==========================================================
+APP_KEY = "BIMTools_AuditWindow"
+
+
+def activate_existing():
+    """Повторное нажатие кнопки: показываем уже открытое окно аудита этой модели.
+    Если окно открыто для другой модели — закрываем его, чтобы не работать с двумя моделями сразу."""
+    try:
+        existing = System.AppDomain.CurrentDomain.GetData(APP_KEY)
+        if existing is None or not existing.win.IsLoaded:
+            return False
+        if existing.doc.IsValidObject and existing.doc.Equals(doc):
+            if existing.win.WindowState == WindowState.Minimized:
+                existing.win.WindowState = WindowState.Normal
+            existing.win.Activate()
+            return True
+        existing.win.Close()
+    except Exception:
+        pass
+    return False
+
+
 if not doc.IsWorkshared:
     show_message(u"Модель не является совместной (рабочие наборы не включены).")
-else:
+elif not activate_existing():
     ui = AuditWindow()
+    System.AppDomain.CurrentDomain.SetData(APP_KEY, ui)
     ui.show()
