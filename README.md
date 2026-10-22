@@ -1,109 +1,116 @@
-﻿# BIMTools — плагины для Autodesk Revit (pyRevit)
+# BIMTools — pyRevit plugins for Autodesk Revit
 
-Набор инструментов автоматизации BIM-координации и проектирования: аудит и очистка модели,
-пакетный экспорт в NWC и IFC, генерация структурных схем слаботочных систем.
+**English** · [Русский](README.ru.md)
 
-Все плагины работают внутри Revit, имеют единый интерфейс (оранжевая палитра, левое меню по разделам)
-и не меняют модель без подтверждения: перед каждым изменением или удалением показывается список
-затрагиваемых элементов.
+A set of BIM coordination and design automation tools: model audit and cleanup,
+batch export to NWC and IFC, and generation of low-voltage system schematics from model data.
 
-## Плагины
+All plugins run inside Revit, share one consistent UI (orange palette, sidebar navigation)
+and never change the model without confirmation: every modification or deletion is preceded
+by a list of the affected elements.
 
-### Аудит модели
+> The plugin UI is in Russian — the tools were built for Russian design offices
+> (Russian workset naming standards and drawing conventions).
 
-![Аудит модели — здоровье модели](docs/screenshots/audit-health.png)
+## Plugins
 
-Комплексная проверка и очистка модели. Шесть разделов:
+### Model Audit
 
-| Раздел | Что делает |
+![Model Audit — model health](docs/screenshots/audit-health.png)
+
+Comprehensive model check and cleanup in six sections:
+
+| Section | What it does |
 |---|---|
-| Связи, оси и уровни | Проверяет, что связи RVT, оси и уровни лежат в своих рабочих наборах (связи — по ключу в имени РН `00_Связь_<ключ>`), и переносит их автоматически |
-| Аудит элементов | Таблица всех элементов с 3D-геометрией (то, что попадает в NWC/IFC): фильтры по категориям и РН, изоляция на 3D-виде, перенос в выбранный РН |
-| Создание РН | Создание рабочих наборов из CSV, выгрузка шаблона и списка РН проекта |
-| Закрепление | Контроль закрепления осей, уровней, связей и базовых точек |
-| Очистка модели | Импорты DWG, неразмещённые изображения и PDF, разрезы не на листах, неиспользуемые семейства, группы и фильтры видов |
-| Здоровье модели | Индекс здоровья 0–100 % с раскрывающимися списками проблем и выделением элементов в модели |
+| Links, grids and levels | Checks that RVT links, grids and levels sit in their worksets (links are matched by the workset key `00_Связь_<key>`, both instance and link type) and fixes them automatically |
+| Element audit | Table of all elements with 3D geometry (what ends up in NWC/IFC): category and workset filters, isolation in a 3D view, moving to a chosen workset |
+| Workset creation | Creates worksets from CSV; exports a template and the project's workset list |
+| Pinning | Controls pinning of grids, levels, links and base points |
+| Model cleanup | Imported DWG, unplaced images and PDFs, sections not on sheets, unused families, groups and view filters |
+| Model health | Health index 0–100 % with expandable issue lists and element selection in the model |
 
-Неиспользуемые семейства определяются тем же правилом, что и штатная команда «Удалить неиспользуемое»
-(Performance Adviser), поэтому марки, головки уровней и осей, профили и семейства из параметров типов
-в список не попадают. Разрезы, у которых зависимые виды стоят на листах, тоже не предлагаются к удалению.
+Unused families are detected with the same rule as Revit's built-in *Purge Unused*
+(Performance Adviser), so tags, level/grid heads, profiles and families referenced by type
+parameters are not reported. Sections whose dependent views are placed on sheets are never
+offered for deletion.
 
-![Аудит модели — очистка модели](docs/screenshots/audit-purge.png)
+![Model Audit — cleanup](docs/screenshots/audit-purge.png)
 
-**Индекс здоровья** = 100 % минус сумма штрафов:
+**Health index** = 100 % minus penalties:
 
-| Показатель | Штраф |
+| Criterion | Penalty |
 |---|---|
-| Предупреждения Revit | 1 % за каждые 15 предупреждений (не меньше 1 %), не более 30 % |
-| Связи, оси и уровни в чужих РН | доля ошибочных × 25 %, от 2 до 25 % |
-| Незакреплённые оси, уровни, связи, базовые точки | доля незакреплённых × 25 %, от 1 до 25 % |
-| Контекстные семейства | 2 % за каждое, не более 20 % |
+| Revit warnings | 1 % per 15 warnings (at least 1 %), up to 30 % |
+| Links, grids and levels in wrong worksets | share of errors × 25 %, from 2 to 25 % |
+| Unpinned grids, levels, links, base points | share of unpinned × 25 %, from 1 to 25 % |
+| In-place families | 2 % each, up to 20 % |
 
-### Экспорт модели
+### Model Export
 
-Пакетный экспорт моделей в **NWC**, **IFC** или в оба формата сразу.
+Batch export of models to **NWC**, **IFC** or both at once.
 
-![Экспорт модели — модели и папки](docs/screenshots/export-models.png)
+![Model Export — models and folders](docs/screenshots/export-models.png)
 
-- Модели открываются в фоне; совместные — с отсоединением от центральной, рабочие наборы связей можно не загружать.
-- Общая папка и общее имя 3D-вида для всех моделей или свои для каждой; имя файла по умолчанию — имя RVT.
-- Раздел «Настройки экспорта» повторяет параметры окон экспорта NWC и IFC в Revit; настройки сохраняются в файл и в пресеты.
-- Если 3D-вида нет, создаётся временный и удаляется после экспорта — модель не меняется.
-- Проверки до запуска: существование файлов и папок, версия файла Revit, совпадение имён файлов в одной папке.
-- Отложенный запуск в заданное время, журнал каждого запуска, автоматическое закрытие диалогов Revit при ночном экспорте.
+- Models are opened in the background; workshared models are detached from central, link worksets can be left closed.
+- One output folder and 3D view name for all models, or individual ones; the file name defaults to the RVT name.
+- The *Export settings* section mirrors Revit's NWC and IFC export dialogs; settings are saved to a file and to presets.
+- If the 3D view is missing, a temporary one is created and removed after export — the model is not changed.
+- Pre-flight checks: files and folders exist, Revit file version, duplicate file names in one folder.
+- Scheduled (overnight) run, a log for every run, automatic dismissal of Revit dialogs during unattended export.
 
-![Экспорт модели — настройки IFC](docs/screenshots/export-settings.png)
+![Model Export — IFC settings](docs/screenshots/export-settings.png)
 
-### Схемы СС
+### Low-voltage schematics (Схемы СС)
 
-Генерация структурной схемы слаботочной системы на чертёжном виде по данным модели:
-корпус → этаж (по отметке) → щит → шлейфы → устройства в порядке подключения.
+Generates a structural schematic of a low-voltage system on a drafting view from model data:
+building → floor (by elevation) → panel → loops → devices in connection order.
 
-![Схемы СС — результат генерации](docs/screenshots/schema-result.png)
+![Schematics — generated result](docs/screenshots/schema-result.png)
 
-- Данные — из параметров `CEC_*` (система, щит, шлейф, УГО, марка, корпус).
-- Порядок устройств — по удалённости от щита или по маркам; длинные шлейфы переносятся «змейкой».
-- УГО — типовые аннотации проекта; линии шлейфов окрашиваются по типу шлейфа.
-- Отчёт с замечаниями к данным: шлейф в нескольких щитах, устройства без шлейфа или уровня, отсутствующие УГО.
-- Раздел «Параметры проекта» одной кнопкой привязывает `CEC_*` к категориям оборудования из файла общих параметров.
-- «Демо-схема» строит схему на синтетических данных — для проверки раскладки без элементов в модели.
+- Data comes from `CEC_*` parameters (system, panel, loop, symbol, mark, building).
+- Device order — by distance from the panel or by marks; long loops wrap as a snake.
+- Symbols are the project's generic annotations; loop lines are coloured by loop type.
+- A report lists data issues: a loop declared in several panels, devices without a loop or level, missing symbols.
+- *Project parameters* binds the `CEC_*` parameters to equipment categories from the shared parameter file in one click.
+- *Demo schematic* builds a diagram from synthetic data — to check the layout without any elements in the model.
 
-Раскладка схемы написана на чистом Python и отделена от Revit API, поэтому её можно проверять вне Revit.
+The layout engine is plain Python, decoupled from the Revit API, so it can be tested outside Revit.
 
-![Схемы СС — окно генерации](docs/screenshots/schema-window.png)
+![Schematics — generator window](docs/screenshots/schema-window.png)
 
-## Установка
+## Installation
 
-1. Установите [pyRevit](https://github.com/pyrevitlabs/pyRevit).
-2. Скачайте репозиторий (`git clone` или ZIP).
-3. В Revit: **pyRevit → Settings → Custom Extension Directories** → добавьте путь к папке `PyRevit-Scripts-BIM`.
-4. **Reload** — появится вкладка **«Общее»** с панелями «Проверка модели», «Экспорт» и «Электрика».
+1. Install [pyRevit](https://github.com/pyrevitlabs/pyRevit).
+2. Download the repository (`git clone` or ZIP).
+3. In Revit: **pyRevit → Settings → Custom Extension Directories** → add the path to the `PyRevit-Scripts-BIM` folder.
+4. **Reload** — the **«Общее»** tab appears with the *Model check*, *Export* and *Electrical* panels.
 
-Требования:
+Requirements:
 
 - Autodesk Revit 2022;
-- для экспорта NWC — Navisworks NWC Export Utility, для IFC — модуль IFC для Revit;
-- плагин «Аудит модели» работает с совместными моделями (с рабочими наборами).
+- NWC export needs the Navisworks NWC Export Utility, IFC export needs IFC for Revit;
+- *Model Audit* works with workshared models (worksets enabled).
 
-## Структура
+## Structure
 
 ```
 PyRevit-Scripts-BIM/
 └── BIMTools.extension/
     └── Общее.tab/
-        ├── Проверка модели.panel/Аудит.pushbutton/        аудит и очистка модели
-        ├── Экспорт.panel/Экспорт модели.pushbutton/       пакетный экспорт NWC / IFC
-        └── Электрика.panel/Схемы СС.pushbutton/           генератор схем слаботочных систем
+        ├── Проверка модели.panel/Аудит.pushbutton/        model audit and cleanup
+        ├── Экспорт.panel/Экспорт модели.pushbutton/       batch NWC / IFC export
+        └── Электрика.panel/Схемы СС.pushbutton/           low-voltage schematic generator
 ```
 
-Каждая кнопка — папка `*.pushbutton` со `script.py` и `icon.png`.
+Each button is a `*.pushbutton` folder with `script.py` and `icon.png`.
 
-## Технологии
+## Tech stack
 
-- **IronPython 2.7** (движок pyRevit) и **Revit API 2022**: транзакции, рабочие наборы, общие параметры, экспорт NWC/IFC, Performance Adviser.
-- **WPF / XAML**: собственные стили окон, немодальные окна с `ExternalEvent` для безопасной работы с моделью.
-- Пресеты и настройки — JSON в профиле пользователя; проектные данные никуда не передаются.
+- **IronPython** (pyRevit engine) and the **Revit API**: transactions, worksets, shared parameters, NWC/IFC export, Performance Adviser.
+- **WPF / XAML**: custom window styles; modeless windows use `ExternalEvent` for safe model access.
+- Presets and settings are stored as JSON in the user profile; project data never leaves the machine.
 
-## Автор
+## Author
 
-Даниил Антоненко
+Daniil Antonenko — BIM coordinator, Revit automation developer ·
+[Telegram @spirtazaru](https://t.me/spirtazaru) · antonencodaniil@gmail.com
