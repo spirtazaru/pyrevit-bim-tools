@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.pyc
+*.pyo
+*.000*.rvt
+*.000*.rfa
+*.log
