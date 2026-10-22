@@ -29,7 +29,9 @@ import System
 from System.Collections.ObjectModel import ObservableCollection
 from System.ComponentModel import INotifyPropertyChanged, PropertyChangedEventArgs
 from System.Windows import Visibility, WindowState, RoutedEventHandler
+from System.Windows.Controls import DataGridRow
 from System.Windows.Controls.Primitives import ButtonBase
+from System.Windows.Media import Visual, VisualTreeHelper
 from System.Windows.Markup import XamlReader
 from System.Windows.Interop import WindowInteropHelper
 from System.Diagnostics import Process
@@ -39,9 +41,6 @@ from pyrevit import revit, DB, forms
 
 doc = revit.doc
 uidoc = revit.uidoc
-
-if not doc.IsWorkshared:
-    forms.alert(u"Модель не является совместной (рабочие наборы не включены).", exitscript=True)
 
 # ==========================================================
 # 1. КОНСТАНТЫ И БАЗОВЫЕ УТИЛИТЫ
@@ -72,6 +71,7 @@ for _bic_name in (
     'OST_Grids', 'OST_Levels', 'OST_RvtLinks', 'OST_ImportObjectStyles',
     'OST_ProjectBasePoint', 'OST_SharedBasePoint', 'OST_IOSModelGroups',
     'OST_Mass', 'OST_MassFloor', 'OST_MassForm', 'OST_Rooms', 'OST_Spaces',
+    'OST_LegendComponents', 'OST_HVAC_Zones',
     'OST_Areas', 'OST_ZoneEquipment', 'OST_PipingSystem', 'OST_DuctSystem',
     'OST_ElectricalCircuit', 'OST_SwitchSystem', 'OST_ShaftOpening',
     'OST_StructuralInternalLoads', 'OST_AnalyticalNodes', 'OST_AnalyticalMember',
@@ -250,6 +250,62 @@ def ensure_active_3d_view(uidoc_instance, doc_instance):
     return None
 
 
+GRAPHIC_VIEW_TYPES = (DB.View3D, DB.ViewPlan, DB.ViewSection)
+
+
+def zoom_to_elements(uidoc_instance, elements):
+    """Приближает активный вид к рамке вокруг элементов (с запасом ~1 м)."""
+    view = uidoc_instance.ActiveView
+    boxes = []
+    for e in elements:
+        bb = e.get_BoundingBox(view) or e.get_BoundingBox(None)
+        if bb is not None:
+            boxes.append(bb)
+    if not boxes:
+        return
+    pad = 3.0  # футы
+    p_min = DB.XYZ(min(b.Min.X for b in boxes) - pad, min(b.Min.Y for b in boxes) - pad, min(b.Min.Z for b in boxes) - pad)
+    p_max = DB.XYZ(max(b.Max.X for b in boxes) + pad, max(b.Max.Y for b in boxes) + pad, max(b.Max.Z for b in boxes) + pad)
+    for ui_view in uidoc_instance.GetOpenUIViews():
+        if id_int(ui_view.ViewId) == id_int(view.Id):
+            ui_view.ZoomAndCenterRectangle(p_min, p_max)
+            break
+
+
+def focus_elements(uidoc_instance, doc_instance, el_ids):
+    """Выделяет элементы в модели и приближает к ним. Не использует ShowElements:
+    он показывает окно Revit «Невозможно подобрать подходящий вид». Вызывать только через ExternalEvent."""
+    elements = [doc_instance.GetElement(i) for i in el_ids]
+    elements = [e for e in elements if e is not None]
+    if not elements:
+        return
+    first = elements[0]
+    if isinstance(first, DB.View):
+        if not first.IsTemplate:
+            uidoc_instance.ActiveView = first
+        return
+    if first.OwnerViewId != DB.ElementId.InvalidElementId:
+        # Элемент вида (2D, легенда, импорт на виде) — открываем вид-владелец
+        owner = doc_instance.GetElement(first.OwnerViewId)
+        if isinstance(owner, DB.View) and id_int(owner.Id) != id_int(uidoc_instance.ActiveView.Id):
+            uidoc_instance.ActiveView = owner
+    elif not isinstance(uidoc_instance.ActiveView, GRAPHIC_VIEW_TYPES):
+        ensure_active_3d_view(uidoc_instance, doc_instance)
+    uidoc_instance.Selection.SetElementIds(List[DB.ElementId]([e.Id for e in elements]))
+    zoom_to_elements(uidoc_instance, elements)
+
+
+def row_item_from_event(e):
+    """Объект строки DataGrid под курсором (для двойного клика), а не ранее выделенная строка."""
+    node = e.OriginalSource
+    while node is not None and not isinstance(node, DataGridRow):
+        if isinstance(node, Visual):
+            node = VisualTreeHelper.GetParent(node)
+        else:
+            node = getattr(node, 'Parent', None)
+    return node.Item if node is not None else None
+
+
 def set_element_workset(element, ws_int):
     try:
         param = element.get_Parameter(DB.BuiltInParameter.ELEM_PARTITION_PARAM)
@@ -258,6 +314,242 @@ def set_element_workset(element, ws_int):
         return bool(param.Set(ws_int))
     except Exception:
         return False
+
+
+# ==========================================================
+# ДИАЛОГИ В СТИЛЕ ОКНА АУДИТА (вместо стандартных TaskDialog)
+# ==========================================================
+# Палитры: 'info' — оранжевая (результаты), 'warn' — красная (предупреждения и подтверждения)
+DIALOG_PALETTES = {
+    'info': {'__TOP__': '#FFFF9440', '__BOTTOM__': '#FFFF6A00', '__ACCENT__': '#FFFF7A1A',
+             '__SOFT__': '#1AFF7A1A', '__BORDER__': '#66FF7A1A', '__TITLE__': '#FF2B2118'},
+    'warn': {'__TOP__': '#FFFF6B4A', '__BOTTOM__': '#FFDC2F1C', '__ACCENT__': '#FFE8452C',
+             '__SOFT__': '#1AE8452C', '__BORDER__': '#80E8452C', '__TITLE__': '#FFA8241A'},
+}
+
+XAML_DIALOG = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="580" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" ResizeMode="NoResize" ShowInTaskbar="False"
+        FontFamily="Segoe UI" FontSize="14" Foreground="#FF2B2118">
+    <Window.Resources>
+        <LinearGradientBrush x:Key="AccentGrad" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="__TOP__" Offset="0"/>
+            <GradientStop Color="__BOTTOM__" Offset="1"/>
+        </LinearGradientBrush>
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="MinWidth" Value="110"/>
+            <Setter Property="Padding" Value="20,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Name="bd" Background="{StaticResource AccentGrad}" CornerRadius="19" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.9"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="GlassButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="MinWidth" Value="110"/>
+            <Setter Property="Padding" Value="18,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Name="bd" Background="#CCFFFFFF" CornerRadius="19" BorderBrush="__BORDER__" BorderThickness="1" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFFFFFFF"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="__ACCENT__"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ScrollBar">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Width" Value="10"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid>
+                            <Border Background="__SOFT__" CornerRadius="5"/>
+                            <Track Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border Background="{StaticResource AccentGrad}" CornerRadius="5" Margin="1" Opacity="0.8"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border Margin="16" CornerRadius="20" Background="#FAFFFFFF" BorderBrush="__BORDER__" BorderThickness="1.5">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.3" Color="#FF000000"/>
+        </Border.Effect>
+        <StackPanel>
+            <Border Name="HeaderBar" CornerRadius="19,19,0,0" Background="__SOFT__" Padding="20,14" Cursor="SizeAll">
+                <StackPanel Orientation="Horizontal">
+                    <Grid Width="30" Height="30" Margin="0,0,12,0">
+                        <Ellipse Fill="{StaticResource AccentGrad}"/>
+                        <TextBlock Name="tbIcon" Text="!" Foreground="White" FontWeight="Bold" FontSize="17"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                    <TextBlock Name="tbTitle" Foreground="__TITLE__" FontWeight="Bold" FontSize="16" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+            <TextBlock Name="tbMessage" TextWrapping="Wrap" FontSize="15" FontWeight="SemiBold" Margin="22,16,22,0"/>
+            <Border Name="bdDetails" Margin="22,12,22,0" CornerRadius="12" Background="__SOFT__"
+                    BorderBrush="__BORDER__" BorderThickness="1" Padding="14,10,8,10">
+                <StackPanel>
+                    <TextBlock Name="tbDetailsHeader" FontWeight="Bold" Foreground="__TITLE__" Margin="0,0,0,6"/>
+                    <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                        <TextBlock Name="tbDetails" TextWrapping="Wrap" FontSize="13" LineHeight="20"/>
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="22,18,22,20">
+                <Button Name="btnNo" Style="{StaticResource GlassButton}" Content="Нет" Margin="0,0,10,0" IsCancel="True"/>
+                <Button Name="btnYes" Style="{StaticResource PrimaryButton}" Content="Да"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>"""
+
+# Окно аудита — владелец диалогов (задаётся при его создании), чтобы диалог был поверх и по центру
+dialog_owner = None
+
+
+def show_message(text, kind='warn', title=None, details=None, ask=False, limit=500):
+    """Модальный диалог в стиле аудита. ask=True — кнопки Да/Нет. Возвращает True при «Да»/«OK»."""
+    xaml = XAML_DIALOG
+    for token, color in DIALOG_PALETTES.get(kind, DIALOG_PALETTES['warn']).items():
+        xaml = xaml.replace(token, color)
+    dlg = XamlReader.Parse(xaml)
+    result = [False]
+
+    tb_title = dlg.FindName('tbTitle')
+    tb_title.Text = title or (u"Подтверждение" if ask else (u"Внимание" if kind == 'warn' else u"Аудит модели"))
+    dlg.Title = tb_title.Text
+    dlg.FindName('tbIcon').Text = u"!" if kind == 'warn' else u"i"
+    dlg.FindName('tbMessage').Text = text
+
+    bd_details = dlg.FindName('bdDetails')
+    if details:
+        lines = list(details)
+        shown = u"\n".join(lines[:limit])
+        if len(lines) > limit:
+            shown += u"\n… и ещё {} шт.".format(len(lines) - limit)
+        dlg.FindName('tbDetailsHeader').Text = u"Элементов: {}".format(len(lines))
+        dlg.FindName('tbDetails').Text = shown
+    else:
+        bd_details.Visibility = Visibility.Collapsed
+
+    btn_yes = dlg.FindName('btnYes')
+    btn_no = dlg.FindName('btnNo')
+    if not ask:
+        btn_no.Visibility = Visibility.Collapsed
+        btn_yes.Content = u"OK"
+        btn_yes.IsDefault = True
+        btn_yes.IsCancel = True
+
+    def on_yes(s, e):
+        result[0] = True
+        dlg.Close()
+
+    def on_drag(s, e):
+        try:
+            dlg.DragMove()
+        except Exception:
+            pass
+
+    btn_yes.Click += on_yes
+    btn_no.Click += lambda s, e: dlg.Close()
+    dlg.FindName('HeaderBar').MouseLeftButtonDown += on_drag
+
+    owner = dialog_owner
+    if owner is not None and owner.IsVisible:
+        dlg.Owner = owner
+        dlg.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterOwner
+    else:
+        dlg.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterScreen
+        try:
+            WindowInteropHelper(dlg).Owner = Process.GetCurrentProcess().MainWindowHandle
+        except Exception:
+            pass
+    dlg.ShowDialog()
+    return result[0]
+
+
+def confirm_action(question, lines):
+    """Показывает список затрагиваемых элементов и спрашивает подтверждение (Да/Нет)."""
+    return show_message(question, kind='warn', details=lines, ask=True)
+
+
+# Правило Performance Adviser «Неиспользуемые семейства и типы» — та же логика, что у штатной
+# команды «Удалить неиспользуемое». Document.GetUnusedElements появился только в Revit 2024.
+PURGE_RULE_GUID = u"e8c63650-70b7-435a-9010-ec97660c1bda"
+
+
+def get_purgeable_ids(d):
+    """Множество int-Id элементов, которые Revit считает неиспользуемыми, или None, если правило недоступно."""
+    try:
+        adviser = DB.PerformanceAdviser.GetPerformanceAdviser()
+        rule_id = None
+        for rid in adviser.GetAllRuleIds():
+            if str(rid.Guid).lower() == PURGE_RULE_GUID:
+                rule_id = rid
+                break
+        if rule_id is None:
+            return None
+        rule_ids = List[DB.PerformanceAdviserRuleId]()
+        rule_ids.Add(rule_id)
+        result = set()
+        for msg in adviser.ExecuteRules(d, rule_ids):
+            for eid in msg.GetFailingElements():
+                result.add(id_int(eid))
+        return result
+    except Exception:
+        return None
+
+
+def count_image_param_refs(d, image_type_id):
+    """Сколько типов и экземпляров ссылаются на картинку через параметры «Изображение типа» / «Изображение»."""
+    total = 0
+    for bip, types_only in ((DB.BuiltInParameter.ALL_MODEL_TYPE_IMAGE, True),
+                            (DB.BuiltInParameter.ALL_MODEL_IMAGE, False)):
+        try:
+            rule = DB.ParameterFilterRuleFactory.CreateEqualsRule(DB.ElementId(bip), image_type_id)
+            collector = DB.FilteredElementCollector(d)
+            collector = collector.WhereElementIsElementType() if types_only else collector.WhereElementIsNotElementType()
+            total += collector.WherePasses(DB.ElementParameterFilter(rule)).GetElementCount()
+        except Exception:
+            pass
+    return total
 
 
 # ==========================================================
@@ -901,8 +1193,33 @@ def fix_links_and_levels(d, st):
         raise
 
 
+GEOMETRY_OPTIONS = DB.Options()
+GEOMETRY_OPTIONS.DetailLevel = DB.ViewDetailLevel.Coarse
+
+
+def has_physical_geometry(el):
+    """Есть ли у элемента 3D-геометрия — то, что попадёт в NWC/IFC (тела, сетки, экземпляры семейств)."""
+    try:
+        geom = el.get_Geometry(GEOMETRY_OPTIONS)
+    except Exception:
+        return False
+    if geom is None:
+        return False
+    for g in geom:
+        if isinstance(g, DB.GeometryInstance):
+            return True
+        if isinstance(g, DB.Solid) and g.Volume > 0:
+            return True
+        if isinstance(g, DB.Mesh) and g.NumTriangles > 0:
+            return True
+    return False
+
+
 def is_valid_model_element(el):
     if el is None or el.ViewSpecific:
+        return False
+    # Элементы, принадлежащие виду (например, компоненты легенды), — не модель
+    if el.OwnerViewId != DB.ElementId.InvalidElementId:
         return False
     cat = el.Category
     if cat is None:
@@ -947,6 +1264,9 @@ def collect_audit_elements(d, uidoc_inst, whole_model, names_by_id, open_by_id):
 
         ws_name = names_by_id[wid]
         is_open = open_by_id.get(wid, True)
+        # Геометрия элементов закрытых РН не загружена — их показываем без проверки геометрии
+        if is_open and not has_physical_geometry(el):
+            continue
         cat_name = el.Category.Name or u"—"
 
         fam_type_name = u"Системный элемент"
@@ -1043,8 +1363,16 @@ def collect_purge_groups(d, names_by_id):
         t_name = safe_name(img_type)
         is_pdf = t_name.lower().endswith(u".pdf")
         cat_label = u"Изображения и PDF"
+        param_refs = count_image_param_refs(d, img_type.Id) if cnt == 0 else 0
 
-        if cnt == 0:
+        if cnt == 0 and param_refs > 0:
+            pdf_img_items.append(PurgeItemRow(
+                img_type.Id, 'pdf_img', cat_label, t_name,
+                u"Тип: {} • Не размещено на видах, но используется в параметрах «Изображение» ({} элем.)".format(
+                    u"PDF" if is_pdf else u"Картинка", param_refs),
+                u"В параметрах ({})".format(param_refs), 'ok', default_checked=False, can_show=False
+            ))
+        elif cnt == 0:
             pdf_img_items.append(PurgeItemRow(
                 img_type.Id, 'pdf_img', cat_label, t_name,
                 u"Тип: {} • Нигде не размещено в проекте (0 экз. на видах и листах)".format(u"PDF" if is_pdf else u"Картинка"),
@@ -1071,15 +1399,23 @@ def collect_purge_groups(d, names_by_id):
         if v.IsTemplate:
             continue
         if v.ViewType == DB.ViewType.Section and id_int(v.Id) not in placed_view_ids:
+            dep_ids = [id_int(x) for x in v.GetDependentViewIds()]
+            # Удаление разреза удаляет и его зависимые виды — если хоть один на листе, разрез не трогаем
+            if any(x in placed_view_ids for x in dep_ids):
+                continue
+            info = u"Разрез нигде не размещен (нет ни на одном листе)"
+            if dep_ids:
+                info += u" • Зависимых видов: {} (будут удалены вместе с разрезом)".format(len(dep_ids))
             section_items.append(PurgeItemRow(
                 v.Id, 'sections', u"Разрезы (не на листах)", safe_name(v),
-                u"Разрез нигде не размещен (нет ни на одном листе)",
+                info,
                 u"Не на листе", 'warn', default_checked=False, can_show=True
             ))
     section_items.sort(key=lambda x: x.Name.lower())
 
     # 4. НЕИСПОЛЬЗУЕМЫЕ ЗАГРУЖАЕМЫЕ СЕМЕЙСТВА
     family_items = []
+    purgeable_ids = get_purgeable_ids(d)
     used_family_ids = set()
     for fi in DB.FilteredElementCollector(d).OfClass(DB.FamilyInstance).WhereElementIsNotElementType().ToElements():
         try:
@@ -1088,19 +1424,17 @@ def collect_purge_groups(d, names_by_id):
         except Exception:
             pass
 
-    for fam in DB.FilteredElementCollector(d).OfClass(DB.Family).ToElements():
+    # Если правило Performance Adviser недоступно, семейства не показываем: без него не отличить
+    # используемые не через экземпляры (марки, головки уровней/осей, профили, ссылки из параметров типов)
+    for fam in (DB.FilteredElementCollector(d).OfClass(DB.Family).ToElements() if purgeable_ids is not None else []):
         try:
             if fam.IsInPlace or not fam.IsEditable:
                 continue
             fid = id_int(fam.Id)
             if fid not in used_family_ids:
-                has_any_inst = False
                 sym_ids = list(fam.GetFamilySymbolIds())
-                for sym_id in sym_ids:
-                    if DB.FilteredElementCollector(d).WherePasses(DB.FamilyInstanceFilter(d, sym_id)).GetElementCount() > 0:
-                        has_any_inst = True
-                        break
-                if has_any_inst:
+                all_types_unused = bool(sym_ids) and all(id_int(s) in purgeable_ids for s in sym_ids)
+                if fid not in purgeable_ids and not all_types_unused:
                     continue
                 cat_n = fam.FamilyCategory.Name if fam.FamilyCategory else u"Прочие семейства"
                 family_items.append(PurgeItemRow(
@@ -1178,7 +1512,9 @@ def collect_purge_groups(d, names_by_id):
     g_fam = PurgeCategoryGroup(
         'families',
         u"4. Неиспользуемые загружаемые семейства (по категориям)",
-        u"Дерево категорий семейств: раскройте нужную категорию или используйте фильтр категорий сверху",
+        u"Дерево категорий семейств: раскройте нужную категорию или используйте фильтр категорий сверху"
+        if purgeable_ids is not None else
+        u"Не удалось получить список неиспользуемых семейств от Revit — раздел пропущен, чтобы не удалить нужное",
         is_expanded=True,
         use_subgroups=True
     )
@@ -2866,7 +3202,7 @@ class ActionEventHandler(IExternalEventHandler):
         try:
             self.window.run_revit_action(self.action, self.payload)
         except Exception as ex:
-            forms.alert(u"Ошибка выполнения операции:\n{}".format(ex))
+            show_message(u"Ошибка выполнения операции:\n{}".format(ex))
 
     def GetName(self):
         return "RevitModelAuditActionHandler"
@@ -2878,6 +3214,8 @@ class ActionEventHandler(IExternalEventHandler):
 class AuditWindow(object):
     def __init__(self):
         self.win = XamlReader.Parse(XAML_UI)
+        global dialog_owner
+        dialog_owner = self.win
         try:
             helper = WindowInteropHelper(self.win)
             helper.Owner = Process.GetCurrentProcess().MainWindowHandle
@@ -3016,31 +3354,13 @@ class AuditWindow(object):
     def show_element_in_revit(self, el_id):
         if el_id is None or el_id == DB.ElementId.InvalidElementId:
             return
-        try:
-            el = doc.GetElement(el_id)
-            if el is None:
-                return
-            if isinstance(el, DB.View) and not el.IsTemplate:
-                uidoc.ActiveView = el
-                return
-            if hasattr(el, 'ViewSpecific') and el.ViewSpecific and el.OwnerViewId != DB.ElementId.InvalidElementId:
-                owner_view = doc.GetElement(el.OwnerViewId)
-                if isinstance(owner_view, DB.View):
-                    uidoc.ActiveView = owner_view
-            uidoc.Selection.SetElementIds(List[DB.ElementId]([el_id]))
-            uidoc.ShowElements(el_id)
-        except Exception:
-            pass
+        self.trigger_action('show_elements', [el_id])
 
     def show_multiple_elements_in_revit(self, el_ids):
         valid_ids = [eid for eid in el_ids if eid is not None and eid != DB.ElementId.InvalidElementId]
         if not valid_ids:
             return
-        try:
-            uidoc.Selection.SetElementIds(List[DB.ElementId](valid_ids[:200]))
-            uidoc.ShowElements(List[DB.ElementId](valid_ids[:50]))
-        except Exception:
-            pass
+        self.trigger_action('show_elements', valid_ids[:200])
 
     def trigger_action(self, action_name, payload=None):
         self.ext_handler.action = action_name
@@ -3104,7 +3424,9 @@ class AuditWindow(object):
             self.btnFixLinks.IsEnabled = True
 
     def on_link_double_click(self, sender, e):
-        row = self.dgLinks.SelectedItem
+        row = row_item_from_event(e)
+        if row is not None:
+            self.dgLinks.SelectedItem = row
         if row and row.RevitId:
             self.show_element_in_revit(row.RevitId)
 
@@ -3232,7 +3554,9 @@ class AuditWindow(object):
             r.IsChecked = val
 
     def on_audit_double_click(self, sender, e):
-        row = self.dgAudit.SelectedItem
+        row = row_item_from_event(e)
+        if row is not None:
+            self.dgAudit.SelectedItem = row
         if row and row.RevitId:
             self.show_element_in_revit(row.RevitId)
 
@@ -3247,7 +3571,7 @@ class AuditWindow(object):
                 self.tbCsvInput.Text = DEFAULT_CSV_TEMPLATE.strip()
                 self.tbCsvStatus.Text = u"Шаблон РН успешно сохранен: {}".format(os.path.basename(path))
             except Exception as ex:
-                forms.alert(u"Не удалось сохранить файл:\n{}".format(ex))
+                show_message(u"Не удалось сохранить файл:\n{}".format(ex))
 
     def on_export_project_ws_csv(self, sender, e):
         self.refresh_worksets_cache()
@@ -3267,7 +3591,7 @@ class AuditWindow(object):
                 self.tbCsvInput.Text = csv_text.strip()
                 self.tbCsvStatus.Text = u"Выгружено {} РН из проекта в файл: {}".format(len(self.worksets), os.path.basename(path))
             except Exception as ex:
-                forms.alert(u"Не удалось сохранить файл:\n{}".format(ex))
+                show_message(u"Не удалось сохранить файл:\n{}".format(ex))
 
     def on_load_csv_file(self, sender, e):
         path = forms.pick_file(file_ext='csv', title=u"Выберите CSV файл рабочих наборов")
@@ -3311,7 +3635,9 @@ class AuditWindow(object):
             r.IsChecked = val
 
     def on_pin_double_click(self, sender, e):
-        row = self.dgPins.SelectedItem
+        row = row_item_from_event(e)
+        if row is not None:
+            self.dgPins.SelectedItem = row
         if row and row.RevitId:
             self.show_element_in_revit(row.RevitId)
 
@@ -3502,7 +3828,7 @@ class AuditWindow(object):
                             selected_ids.append(eid)
 
         if not selected_ids:
-            forms.alert(u"Раскройте нужный показатель здоровья и отметьте галочками предупреждения или элементы, которые нужно выделить в модели.")
+            show_message(u"Раскройте нужный показатель здоровья и отметьте галочками предупреждения или элементы, которые нужно выделить в модели.")
             return
         self.show_multiple_elements_in_revit(selected_ids)
 
@@ -3510,22 +3836,32 @@ class AuditWindow(object):
     # ВЫПОЛНЕНИЕ ТРАНЗАКЦИЙ В КОНТЕКСТЕ REVIT API
     # ----------------------------------------------------------
     def run_revit_action(self, action, payload):
-        if action == 'fix_links':
+        if action == 'show_elements':
+            focus_elements(uidoc, doc, payload or [])
+
+        elif action == 'fix_links':
+            lines = [
+                u"{}: «{}» ➔ «{}»".format(r.LinkName, r.CurrentWS, r.TargetWS)
+                for r in self.links_state.rows
+                if r.Kind == 'err' and r.RevitId is not None and r.TargetWsId is not None
+            ]
+            if not lines or not confirm_action(u"Перенести элементы в целевые рабочие наборы?", lines):
+                return
             fixed, failed = fix_links_and_levels(doc, self.links_state)
             self.refresh_links_view()
             self.refresh_health_view()
-            forms.alert(u"Перенесено элементов: {}\nНе удалось перенести: {}".format(fixed, failed))
+            show_message(u"Перенесено элементов: {}\nНе удалось перенести: {}".format(fixed, failed), kind='info')
 
         elif action == 'isolate_audit':
             items = [r.RevitId for r in (self.dgAudit.ItemsSource or []) if r.IsChecked]
             if not items and self.dgAudit.SelectedItem:
                 items = [self.dgAudit.SelectedItem.RevitId]
             if not items:
-                forms.alert(u"Отметьте элементы галочками для изоляции на 3D-виде.")
+                show_message(u"Отметьте элементы галочками для изоляции на 3D-виде.")
                 return
             v3d = ensure_active_3d_view(uidoc, doc)
             if v3d is None:
-                forms.alert(u"Не найден 3D-вид для изоляции элементов.")
+                show_message(u"Не найден 3D-вид для изоляции элементов.")
                 return
             t = DB.Transaction(doc, u"Изоляция элементов на 3D")
             t.Start()
@@ -3551,11 +3887,14 @@ class AuditWindow(object):
         elif action == 'move_audit_ws':
             target_opt = self.cmbTargetWs.SelectedItem
             if target_opt is None:
-                forms.alert(u"Выберите целевой рабочий набор в списке.")
+                show_message(u"Выберите целевой рабочий набор в списке.")
                 return
             rows = [r for r in (self.dgAudit.ItemsSource or []) if r.IsChecked]
             if not rows:
-                forms.alert(u"Отметьте галочками элементы для переноса.")
+                show_message(u"Отметьте галочками элементы для переноса.")
+                return
+            lines = [u"{} / {} («{}»)".format(r.Category, r.FamilyType, r.Workset) for r in rows]
+            if not confirm_action(u"Перенести элементы в рабочий набор «{}»?".format(target_opt.Name), lines):
                 return
             moved, failed = 0, 0
             t = DB.Transaction(doc, u"Перенос элементов в РН")
@@ -3572,13 +3911,13 @@ class AuditWindow(object):
                 t.RollBack()
                 raise
             self.refresh_audit_data()
-            forms.alert(u"Успешно перенесено в «{}»: {}\nНедоступно для изменения: {}".format(
-                target_opt.Name, moved, failed))
+            show_message(u"Успешно перенесено в «{}»: {}\nНедоступно для изменения: {}".format(
+                target_opt.Name, moved, failed), kind='info')
 
         elif action == 'create_ws_csv':
             rows = parse_rules_csv(self.tbCsvInput.Text or u"")
             if not rows:
-                forms.alert(u"Введите список рабочих наборов или загрузите CSV-файл.")
+                show_message(u"Введите список рабочих наборов или загрузите CSV-файл.")
                 return
             existing = {norm_name(w.Name) for w in get_user_worksets(doc)}
             created = 0
@@ -3606,7 +3945,11 @@ class AuditWindow(object):
             pin_val = bool(payload)
             rows = [r for r in (self.dgPins.ItemsSource or []) if r.IsChecked]
             if not rows:
-                forms.alert(u"Отметьте элементы галочками.")
+                show_message(u"Отметьте элементы галочками.")
+                return
+            lines = [u"{}: {}".format(r.Category, r.Name) for r in rows]
+            question = u"Закрепить выбранные элементы?" if pin_val else u"Открепить выбранные элементы?"
+            if not confirm_action(question, lines):
                 return
             changed = 0
             t = DB.Transaction(doc, u"Изменение закрепления элементов")
@@ -3635,7 +3978,10 @@ class AuditWindow(object):
                     if it.IsChecked:
                         rows_to_delete.append(it)
             if not rows_to_delete:
-                forms.alert(u"Отметьте галочками элементы для удаления.")
+                show_message(u"Отметьте галочками элементы для удаления.")
+                return
+            lines = [u"{} — {}".format(r.CategoryLabel, r.Name) for r in rows_to_delete]
+            if not confirm_action(u"Удалить выбранные элементы из модели? Отменить можно только через Ctrl+Z.", lines):
                 return
 
             deleted, failed = 0, 0
@@ -3643,6 +3989,10 @@ class AuditWindow(object):
             t.Start()
             try:
                 for r in rows_to_delete:
+                    # Уже удалён вместе с другим элементом (например, зависимый вид вместе с разрезом)
+                    if doc.GetElement(r.RevitId) is None:
+                        deleted += 1
+                        continue
                     try:
                         doc.Delete(r.RevitId)
                         deleted += 1
@@ -3655,7 +4005,7 @@ class AuditWindow(object):
 
             self.refresh_purge_data()
             self.refresh_health_view()
-            forms.alert(u"Удалено выбранных элементов: {}\nЗащищено системой / не удалено: {}".format(deleted, failed))
+            show_message(u"Удалено выбранных элементов: {}\nЗащищено системой / не удалено: {}".format(deleted, failed), kind='info')
 
     def show(self):
         self.win.Show()
@@ -3664,5 +4014,8 @@ class AuditWindow(object):
 # ==========================================================
 # 7. ЗАПУСК ПЛАГИНА
 # ==========================================================
-ui = AuditWindow()
-ui.show()
+if not doc.IsWorkshared:
+    show_message(u"Модель не является совместной (рабочие наборы не включены).")
+else:
+    ui = AuditWindow()
+    ui.show()
