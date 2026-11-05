@@ -755,7 +755,7 @@ def draw_plan(canvas, calc, item, plan, pad):
             if lay is not None:
                 sk.line(b0, lay.n(p, y_c), a1, lay.n(p, y_c), kd.SECOND, 1.0, dash=True)
         sk.text((b0 + a1) / 2.0, (n_lo + n_hi) / 2.0, u"проём", size=10.5)
-    sk.line(x1, n_lo - 25, x1, n_hi + 25, kd.CONCRETE_EDGE, 0.8, dash=True)
+    sk.break_line(x1, n_lo - 25, x1, n_hi + 25)
     targets = {}
 
     def near_rows(bars, y, tol):

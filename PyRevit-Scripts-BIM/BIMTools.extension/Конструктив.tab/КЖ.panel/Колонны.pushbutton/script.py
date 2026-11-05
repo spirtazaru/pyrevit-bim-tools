@@ -36,6 +36,9 @@ for _name in [n for n in sys.modules if n == "kzh" or n.startswith("kzh.")]:
 from kzh import element_name, ui
 from kzh import runner
 from kzh import drawing as kd
+from kzh import details as kdet
+from kzh.detail_picker import CARD as DETAILS_CARD, DetailPicker
+from kzh import model_rebar
 from kzh import geometry as kg
 from kzh import norms, settings
 from kzh import rebar as kr
@@ -379,6 +382,19 @@ def bend_leg(calc, d, z_end, z_top, slab):
     return norms.ceil_to(max(calc.anchorage(d) - embed, 10 * d))
 
 
+def section_bars(lay, so):
+    """Продольные стержни прямоугольного сечения [(u, v, Ø)] в постоянном порядке: углы (верх слева, верх справа,
+    низ справа, низ слева), промежуточные верхней грани, нижней, боковые слева, боковые справа.
+    По номерам в этом списке хранятся детали, поставленные щелчками."""
+    out = [(-lay.ut, lay.vt, so["d_ct"]), (lay.ut, lay.vt, so["d_ct"]),
+           (lay.ub, lay.vb, so["d_cb"]), (-lay.ub, lay.vb, so["d_cb"])]
+    out += [(u, lay.v_mid_t, so["d_t"]) for u in lay.u_top]
+    out += [(u, lay.v_mid_b, so["d_b"]) for u in lay.u_bot]
+    out += [(-lay.u_side, v, so["d_s"]) for v in lay.v_side]
+    out += [(lay.u_side, v, so["d_s"]) for v in lay.v_side]
+    return out
+
+
 def stirrup_loop(calc, sec, z, ds):
     """Замкнутый хомут Ø ds на отметке z (обход против часовой стрелки, вид сверху).
     Круглый: замкнутую окружность Revit не принимает (проверено в Revit 2022), поэтому с отгибами —
@@ -515,7 +531,33 @@ def plan_stirrups(calc_of, prof, zones_mm, specs):
                 n_st += count
                 if calc.kind == RECT:
                     n_ties += plan_ties(calc, part.sec, zf, d, layout, count, specs)
+                    n_st += plan_details(calc, part.sec, zf, d, layout, count, specs)
     return n_st, n_ties
+
+
+_LIBRARY = []
+
+
+def library():
+    """Библиотека деталей (читается один раз за запуск кнопки)."""
+    if not _LIBRARY:
+        _LIBRARY.extend(kdet.load_library())
+    return _LIBRARY
+
+
+def plan_details(calc, sec, z, ds, layout, count, specs):
+    """Детали из конфигуратора, поставленные в сечении: с той же раскладкой, что и хомут зоны,
+    попеременно выше и ниже хомута (стержни не пересекаются)."""
+    lay = Layout(calc, mm(sec.b), mm(sec.h), ds)
+    n = 0
+    placed = kdet.placed(calc.so.get("details"), section_bars(lay, calc.so), library())[0]
+    for (det, pts, closed, _), off in zip(placed, kdet.offsets([q[0] for q in placed], ds)):
+        zd = z + ft(off)
+        curves = kr.polyline([sec.point(ft(u), ft(v), zd) for u, v in pts])
+        spec = kdet.apply_to(kr.BarSpec(kdet.role(det), det["d"], curves, DB.XYZ.BasisZ, layout, count), det)
+        specs.append(spec)
+        n += count
+    return n
 
 
 def plan_ties(calc, sec, z, ds, layout, count, specs):
@@ -726,7 +768,7 @@ def reinforce(groups, ho, skipped):
 # ==========================================================
 def draw_section(canvas, calc, sec, pad):
     """Рисунок сечения участка в области холста за вычетом pad (место под поля редактора).
-    Возвращает (Layout, {ключ группы полей: точка выноски в px})."""
+    Возвращает (Layout, {ключ группы полей: точка выноски в px}, Sketch)."""
     so = calc.so
     b, h = mm(sec.b), mm(sec.h)
     sk = kd.Sketch(canvas, (-b / 2.0, -h / 2.0, b / 2.0, h / 2.0), pad=pad)
@@ -749,7 +791,7 @@ def draw_section(canvas, calc, sec, pad):
             "stirrup": P(lay.stirrup_r, 0.0),
             "cover": P(-(b / 2.0 - c / 2.0) * math.cos(-a), (b / 2.0 - c / 2.0) * math.sin(-a)),
         }
-        return lay, targets
+        return lay, targets, sk
 
     cv = calc.covers
     sk.rect(-b / 2.0, -h / 2.0, b / 2.0, h / 2.0, kd.CONCRETE_EDGE, 1.5, kd.CONCRETE)
@@ -793,7 +835,7 @@ def draw_section(canvas, calc, sec, pad):
         "corner_bot": P(-lay.ub, lay.vb),
         "ties": tie_target(lay, P),
     }
-    return lay, targets
+    return lay, targets, sk
 
 
 def tie_target(lay, P):
@@ -1186,6 +1228,8 @@ SECTION_FIELDS = [
                    "note": u"Закрепляют промежуточные стержни: по СП 63 — при грани шире 400 мм или более 4 стержней у грани.",
                    "rows": [[("combo", "ties", [Option(t, k) for k, t in TIES_OPTIONS], 220)], [u"Ø", ("diam", "dt")],
                             [("hint", "ties")]]}),
+    DETAILS_CARD,
+    model_rebar.CARD,
     # Круглая колонна
     ("bars", "L", {"title": u"Продольные стержни", "note": u"Равномерно по окружности.",
                    "rows": [[u"Количество", ("num", "n", 40), u"шт. Ø", ("diam", "d")]]}),
@@ -1199,8 +1243,8 @@ SECTION_FIELDS = [
                       "rows": [[u"c", ("num", "cc", 46), u"мм"], [("hint", "cc")]]}),
 ]
 VISIBLE_GROUPS = {
-    RECT: ("corner_top", "mid_top", "cover_t", "stirrup", "ties"),
-    ROUND: ("bars", "stirrup", "cover"),
+    RECT: ("corner_top", "mid_top", "cover_t", "stirrup", "ties", "details", "model"),
+    ROUND: ("bars", "stirrup", "cover", "model"),
     "corbel": ("c_top", "c_stir", "c_cover"),
 }
 # Поля на виде по высоте (кроме строк зон)
@@ -1244,6 +1288,12 @@ class ColumnsWindow(ui.KzhWindow):
         self._src = "section"     # где был последний ввод: хомут Ø/S есть и в сечении, и в зонах по высоте
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, lambda: self.on_edit("section"))
         self.editor.build(SECTION_FIELDS)
+        # Детали из конфигуратора: выбор в списке, щелчки по стержням рисунка
+        self.picker = DetailPicker(self.window, self.editor, self.cnvSection, library(),
+                                   lambda: self.current.part_opts[self.part].setdefault("details", []), self.refresh)
+        # Сечение по арматуре, которая уже стоит в модели
+        self.show_model = False
+        self.editor.buttons["mdl_show"].Click += self.on_model_toggle
         self.zeditor = ZoneEditor(self.window, self.cnvElev, self.cnvElevFields, lambda: self.on_edit("zones"))
         self.zeditor.build(ELEV_FIELDS)
 
@@ -1265,6 +1315,8 @@ class ColumnsWindow(ui.KzhWindow):
                 if p.kind == "shaft":
                     o = dict(SECTION_DEFAULTS[part_kind(p)])
                     o.update(dict((k, v) for k, v in (saved.get(part_kind(p)) or {}).items() if k in o))
+                    if part_kind(p) == RECT:
+                        o["details"] = [dict(d) for d in (saved.get(RECT) or {}).get("details") or []]
                 else:
                     o = dict(CORBEL_DEFAULTS)
                     o.update(dict((k, v) for k, v in (saved.get("corbel") or {}).items() if k in o))
@@ -1401,6 +1453,7 @@ class ColumnsWindow(ui.KzhWindow):
         if self.current is not None:
             self.read_all()
         self.current = g
+        self.picker.reset()
         self._loading = True
         try:
             self.cbPart.ItemsSource = [PartItem(part_title(g.prof0, i), i) for i in range(len(g.prof0.parts))]
@@ -1420,6 +1473,7 @@ class ColumnsWindow(ui.KzhWindow):
             return
         self.read_all()
         self.part = item.index
+        self.picker.reset()
         self.load_part()
         self.refresh()
 
@@ -1488,13 +1542,18 @@ class ColumnsWindow(ui.KzhWindow):
             self.tbSectionInfo.Text = info
             return
         so = g.part_opts[i]
+        self.editor.buttons["mdl_show"].Content = u"Вернуть расчёт окна" if self.show_model else u"Показать из модели"
+        if self.show_model and self.refresh_model(g, i):
+            return
         calc = Calc(ho, so, part_kind(part), g.zones)
         for key in ("c_s", "c_t", "c_b", "c"):
             self.editor.set_hint(key, u"" if so.get(key) else u"пусто — {:.0f} по норме".format(float(calc.cover_auto)))
         self.editor.set_hint("step", u"основная зона по высоте")
-        lay, targets = draw_section(self.cnvSection, calc, part.sec, self.editor.pad())
+        lay, targets, sk = draw_section(self.cnvSection, calc, part.sec, self.editor.pad())
         if part_kind(part) == RECT:
             self.editor.set_hint("ties", ties_text(so, lay))
+            targets["details"] = self.picker.draw(sk, section_bars(lay, so), so.setdefault("details", []))
+        targets["model"] = model_rebar.TARGET
         self.editor.place(targets)
         info = u"Стержней: {} • As = {:.1f} см² • μ = {:.2f} %".format(lay.count, float(lay.area / 100.0), float(lay.mu))
         if lay.error:
@@ -1525,6 +1584,37 @@ class ColumnsWindow(ui.KzhWindow):
         self.tbElevInfo.Text = (u"Зоны хомутов — снизу вверх; пустая длина — зона занимает остаток высоты. "
                                 u"В зонах консолей вместо хомутов колонны — хомуты консоли (раздел «Сечение»). "
                                 u"Вид — по первой колонне группы.")
+
+    def on_model_toggle(self, sender, args):
+        self.show_model = not self.show_model
+        self.refresh()
+
+    def refresh_model(self, g, i):
+        """Сечение участка i по арматуре из модели (первая колонна группы, у которой она есть). False — показать нечего."""
+        for col, prof in g.items:
+            if kr.host_rebar_ids(col):
+                break
+        else:
+            self.editor.set_hint("mdl", u"У колонн этой группы в модели арматуры нет.")
+            return False
+        part = prof.parts[i]
+        sec = part.sec
+        level = (part.z0 + part.z1) / 2.0
+        bars, loops, summary = model_rebar.section(doc, col, sec.point, 2, level)
+        b, h = mm(sec.b), mm(sec.h)
+        if sec.is_round:
+            import math as _m
+            outline = [(b / 2.0 * _m.cos(a * _m.pi / 36), b / 2.0 * _m.sin(a * _m.pi / 36)) for a in range(72)]
+            sizes = (u"⌀{:.0f}".format(b), u"")
+        else:
+            outline = [(-b / 2.0, -h / 2.0), (b / 2.0, -h / 2.0), (b / 2.0, h / 2.0), (-b / 2.0, h / 2.0)]
+            sizes = (u"b = {:.0f}".format(b), u"h = {:.0f}".format(h))
+        model_rebar.draw(self.cnvSection, outline, bars, loops, self.editor.pad(), sizes)
+        where = u"{} • сечение на отметке {:.0f}".format(column_title(col), mm(level))
+        self.editor.set_hint("mdl", where + (u" • " + u"; ".join(summary) if summary else u" • в сечении стержней нет"))
+        self.editor.place(model_rebar.stacked(self.editor))
+        self.tbSectionInfo.Text = u"Из модели: " + where + u". Поля слева — настройки окна для армирования, рисунок — то, что стоит в модели."
+        return True
 
     def on_run(self, sender, args):
         if self.current is not None:

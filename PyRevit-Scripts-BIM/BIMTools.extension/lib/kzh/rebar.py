@@ -100,6 +100,19 @@ def hook_types(doc):
                   key=lambda h: element_name(h))
 
 
+def hook_by_angle(doc, angle, style):
+    """Тип отгиба проекта с углом angle (градусы) и стилем style; None — такого нет или angle = 0."""
+    if not angle:
+        return None
+    for h in hook_types(doc):
+        try:
+            if abs(math.degrees(h.HookAngle) - angle) < 1.0 and h.Style == style:
+                return h
+        except Exception:
+            pass
+    return None
+
+
 def default_stirrup_hook(doc):
     """Отгиб 135° для хомутов, если такой тип есть в проекте."""
     for h in hook_types(doc):
@@ -250,6 +263,9 @@ class BarSpec(object):
         self.layout = layout
         self.count = count
         self.arm_count = 1      # значение АрмЧисло: один элемент вместо N одинаковых (лягушки плит)
+        self.steel = None       # класс детали из конфигуратора (None — класс кнопки по роли)
+        self.hook_angle = None  # крюк детали: угол в градусах (0 — без крюков; None — отгиб кнопки по роли)
+        self.hook_len = None    # длина крюка детали, мм (None — по типу стержня Revit)
 
     @property
     def transverse(self):
@@ -257,6 +273,8 @@ class BarSpec(object):
 
 
 def type_key(spec, steel_long, steel_trans):
+    if spec.steel:
+        return (spec.d, spec.steel)
     return (spec.d, steel_trans if spec.transverse else steel_long)
 
 
@@ -277,9 +295,13 @@ def build_specs(doc, host, specs, types, steel_long, steel_trans, shapes, hooks)
     created, quantity = [], 0
     for spec in specs:
         bt = types[type_key(spec, steel_long, steel_trans)]
-        hook = hooks.get(spec.role)
-        allow_hook(bt, hook)
         style = STYLE_STIRRUP if spec.role in ("stirrup", "pin") else STYLE_MAIN
+        hook = hooks.get(spec.role) if spec.hook_angle is None else hook_by_angle(doc, spec.hook_angle, style)
+        allow_hook(bt, hook)
+        if hook is not None and spec.hook_len:
+            # Длина крюка детали: в Revit задаётся у типа стержня для этого типа крюка
+            bt.SetAutoCalcHookLengths(hook.Id, False)
+            bt.SetHookLength(hook.Id, ft(spec.hook_len))
         rb = create_bar(doc, host, style, bt, spec.curves, spec.norm, shapes.get(spec.role), hook)
         if spec.layout is not None:
             if spec.layout[0] == "fixed":

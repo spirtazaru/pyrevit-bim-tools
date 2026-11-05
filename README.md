@@ -3,7 +3,8 @@
 **English** · [Русский](README.ru.md)
 
 A set of BIM coordination and design automation tools: model audit and cleanup,
-batch export to NWC and IFC, and generation of low-voltage system schematics from model data.
+batch export to NWC and IFC, generation of low-voltage system schematics from model data,
+and reinforced concrete detailing (KZh).
 
 All plugins run inside Revit, share one consistent UI (orange palette, sidebar navigation)
 and never change the model without confirmation: every modification or deletion is preceded
@@ -78,35 +79,94 @@ The layout engine is plain Python, decoupled from the Revit API, so it can be te
 
 ![Schematics — generator window](docs/screenshots/schema-window.png)
 
+### KZh — reinforced concrete detailing
+
+The **«Конструктив»** tab reinforces structural elements to the Russian code SP 63.13330; drawings in the windows
+follow GOST / SPDS drafting standards. Elements are grouped by cross-section; a scheme is set up per group and turned
+into Revit `Rebar` with covers, hooks, laps and anchorage.
+
+![KZh — column section with a rhomb tie from the detail library](docs/screenshots/kzh-columns.png)
+
+| Button | What it does |
+|---|---|
+| Project setup | Rebar shared parameters, code settings (covers, anchorage, laps), bar shapes |
+| Columns | Rectangular and round sections, parts along the height and corbels, tie zones, starter bars |
+| Beams | Bottom, top and side bars, stirrups and pins, zones along the span, flanges |
+| Walls | One or two meshes, shear walls with boundary zones, U-bars at wall ends, opening trimmer bars |
+| Slabs | Solid, foundation, on metal deck, ribbed; meshes and edge U-bars |
+| Junctions | L and T wall junctions: L- and U-bars, vertical bars in the junction |
+| Stairs | Cast-in-place stairs: flight meshes, L-bars in steps, edge U-bars, landings |
+| Details | Configurator for stirrups, rhombs, pins, "frog" ties, L- and U-bars |
+| Service | Rebar check, marks and steel take-off, re-reinforcing changed elements |
+
+- Every window shows the element section or view as a GOST/SPDS drawing with dimensions, leaders and break lines; inputs sit next to what they change.
+- An empty field means "per code": cover, spacing, anchorage and lap come from SP 63 for the chosen diameter and conditions.
+- A list of elements is shown before rebar is created; existing rebar is replaced only after confirmation.
+- *Show from model* in *Columns* and *Beams* draws the section from the rebar already placed in the element — to review finished reinforcement.
+
+![KZh — tie zones along the column height](docs/screenshots/kzh-columns-height.png)
+
+![KZh — beam section](docs/screenshots/kzh-beams.png)
+
+![KZh — two-mesh wall with pins and U-bars](docs/screenshots/kzh-walls.png)
+
+![KZh — slab on metal deck](docs/screenshots/kzh-slabs.png)
+
+![KZh — wall corner junction](docs/screenshots/kzh-nodes.png)
+
+![KZh — round column section drawn from the rebar in the model](docs/screenshots/kzh-model-rebar.png)
+
+**Details.** Stirrups, rhombs, pins, "frog" ties, troughs, L- and U-bars are drawn like a row of a bar bending
+schedule: dimensions are edited right on the sketch, length and mass update instantly. The library lives in the user
+profile and is available in any project. In the *Columns* and *Beams* windows a detail is placed by clicking the bars
+of the section: a stirrup or rhomb wraps the selected bars, a pin goes between two.
+
+![KZh — detail configurator](docs/screenshots/kzh-details.png)
+
+**Service.** The check finds bars outside concrete, cover below code and spacing above code. Identical bars share
+one mark; the steel take-off exports to CSV. Each reinforced element remembers its geometry, so after a size change
+the plugin shows what needs re-reinforcing.
+
+![KZh — rebar check](docs/screenshots/kzh-check.png)
+
+![KZh — marks and steel take-off](docs/screenshots/kzh-schedule.png)
+
 ## Installation
 
 1. Install [pyRevit](https://github.com/pyrevitlabs/pyRevit).
 2. Download the repository (`git clone` or ZIP).
 3. In Revit: **pyRevit → Settings → Custom Extension Directories** → add the path to the `PyRevit-Scripts-BIM` folder.
-4. **Reload** — the **«Общее»** tab appears with the *Model check*, *Export* and *Electrical* panels.
+4. **Reload** — the **«Общее»** tab appears with the *Model check*, *Export* and *Electrical* panels,
+   and the **«Конструктив»** tab with the *KZh* panel.
 
 Requirements:
 
 - Autodesk Revit 2022;
 - NWC export needs the Navisworks NWC Export Utility, IFC export needs IFC for Revit;
-- *Model Audit* works with workshared models (worksets enabled).
+- *Model Audit* works with workshared models (worksets enabled);
+- for KZh, run *Project setup* once in the model (shared parameters and bar shapes).
 
 ## Structure
 
 ```
 PyRevit-Scripts-BIM/
 └── BIMTools.extension/
-    └── Общее.tab/
-        ├── Проверка модели.panel/Аудит.pushbutton/        model audit and cleanup
-        ├── Экспорт.panel/Экспорт модели.pushbutton/       batch NWC / IFC export
-        └── Электрика.panel/Схемы СС.pushbutton/           low-voltage schematic generator
+    ├── Общее.tab/
+    │   ├── Проверка модели.panel/Аудит.pushbutton/        model audit and cleanup
+    │   ├── Экспорт.panel/Экспорт модели.pushbutton/       batch NWC / IFC export
+    │   └── Электрика.panel/Схемы СС.pushbutton/           low-voltage schematic generator
+    ├── Конструктив.tab/КЖ.panel/                          rebar: columns, beams, walls, slabs, junctions,
+    │                                                      stairs, details, service, project setup
+    └── lib/kzh/                                           shared KZh code: code tables, section layout,
+                                                           Rebar creation, SPDS drawings, section editor
 ```
 
 Each button is a `*.pushbutton` folder with `script.py` and `icon.png`.
 
 ## Tech stack
 
-- **IronPython** (pyRevit engine) and the **Revit API**: transactions, worksets, shared parameters, NWC/IFC export, Performance Adviser.
+- **IronPython** (pyRevit engine) and the **Revit API**: transactions, worksets, shared parameters, NWC/IFC export, Performance Adviser,
+  rebar (`Rebar`, `RebarShape`, `RebarConstraintsManager`), Extensible Storage.
 - **WPF / XAML**: custom window styles; modeless windows use `ExternalEvent` for safe model access.
 - Presets and settings are stored as JSON in the user profile; project data never leaves the machine.
 

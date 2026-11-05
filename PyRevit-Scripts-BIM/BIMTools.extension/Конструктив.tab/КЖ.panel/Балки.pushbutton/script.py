@@ -43,6 +43,9 @@ for _name in [n for n in sys.modules if n == "kzh" or n.startswith("kzh.")]:
 from kzh import element_name, ui
 from kzh import runner
 from kzh import drawing as kd
+from kzh import details as kdet
+from kzh.detail_picker import CARD as DETAILS_CARD, DetailPicker
+from kzh import model_rebar
 from kzh import geometry as kg
 from kzh import norms, settings
 from kzh import rebar as kr
@@ -360,6 +363,28 @@ def plan_long(calc, sec, length, b, h, supports, specs):
     return lay
 
 
+def section_bars(lay, so):
+    """Продольные стержни ребра [(v, t, Ø)] в постоянном порядке: нижний ряд, верхний ряд, боковые слева, справа.
+    По номерам в этом списке хранятся детали, поставленные щелчками; у плоского каркаса деталей нет."""
+    if lay.flat:
+        return []
+    out = [(v, lay.t_bot, so["d_bot"]) for v in lay.v_bot]
+    out += [(v, lay.t_top, so["d_top"]) for v in lay.v_top]
+    out += [(lay.vc - lay.v_side, t, so["d_side"]) for t in lay.t_side]
+    out += [(lay.vc + lay.v_side, t, so["d_side"]) for t in lay.t_side]
+    return out
+
+
+_LIBRARY = []
+
+
+def library():
+    """Библиотека деталей (читается один раз за запуск кнопки)."""
+    if not _LIBRARY:
+        _LIBRARY.extend(kdet.load_library())
+    return _LIBRARY
+
+
 def plan_stirrups(calc, sec, length, b, h, specs):
     """Поперечная арматура: хомуты ребра (или стержни плоского каркаса) и шпильки по зонам, хомуты полок.
     Возвращает (зоны, число хомутов ребра, число шпилек, число хомутов полок)."""
@@ -398,6 +423,13 @@ def plan_stirrups(calc, sec, length, b, h, specs):
                                 sec.point(ft(xt), ft(lay.vc + lay.v_side + ext), ft(t))])
             specs.append(kr.BarSpec("pin", dt, line, sec.a, ("spacing", ft(tie_step), ft(zlen), first, last), tie_count))
             n_ties += tie_count
+        # Детали из конфигуратора — с раскладкой хомута зоны, попеременно по обе стороны от него
+        placed = kdet.placed(so.get("details"), section_bars(lay, so), library())[0]
+        for (det, pts, closed, _), off in zip(placed, kdet.offsets([q[0] for q in placed], d)):
+            xd = x + off
+            curves = kr.polyline([sec.point(ft(xd), ft(v), ft(t)) for v, t in pts])
+            specs.append(kdet.apply_to(kr.BarSpec(kdet.role(det), det["d"], curves, sec.a, layout, count), det))
+            n_st += count
     # Хомуты полок: замкнутые по контуру полки, один шаг по всей длине
     lay = Layout(calc, b, h)
     for fl in lay.flanges:
@@ -483,7 +515,7 @@ def section_outline(shape, h):
 
 
 def draw_section(canvas, calc, group, pad):
-    """Сечение балки с полями в стиле ЛИРА. Возвращает (Layout, цели выносок)."""
+    """Сечение балки с полями в стиле ЛИРА. Возвращает (Layout, цели выносок, Sketch)."""
     so, sh = calc.so, calc.shape
     b, h = float(group.b), float(group.h)
     sk = kd.Sketch(canvas, (-b / 2.0, 0.0, b / 2.0, h), pad=pad)
@@ -542,7 +574,7 @@ def draw_section(canvas, calc, group, pad):
         targets["fbars_" + key] = P(tip, fl["layers"][0])
         va, vb, ta, tb = fl["loop"]
         targets["fstir_" + key] = P(va, (ta + tb) / 2.0)
-    return lay, targets
+    return lay, targets, sk
 
 
 def ties_text(so, lay):
@@ -811,8 +843,10 @@ SECTION_FIELDS = [
                   "rows": [[u"Количество", ("num", "n_bot", 40), u"шт. Ø", ("diam", "d_bot")], [("hint", "n_bot")]]}),
     ("fbars_t", "R", _flange_card("t", u"Полка сверху")),
     ("fbars_b", "R", _flange_card("b", u"Полка снизу")),
+    DETAILS_CARD,
+    model_rebar.CARD,
 ]
-BASE_GROUPS = ("cover_t", "stirrup", "top", "side", "bot", "ties")
+BASE_GROUPS = ("cover_t", "stirrup", "top", "side", "bot", "ties", "details", "model")
 ELEV_FIELDS = [
     ("first", "L", {"title": u"Первый хомут", "note": u"Расстояние от торца балки до первого хомута.",
                     "rows": [[u"Отступ", ("num", "first_offset", 46), u"мм"], [("hint", "first_offset")]]}),
@@ -847,6 +881,12 @@ class BeamsWindow(ui.KzhWindow):
 
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, lambda: self.on_edit("section"))
         self.editor.build(SECTION_FIELDS)
+        # Детали из конфигуратора: выбор в списке, щелчки по стержням рисунка
+        self.picker = DetailPicker(self.window, self.editor, self.cnvSection, library(),
+                                   lambda: self.current.opts.setdefault("details", []), self.refresh)
+        # Сечение по арматуре, которая уже стоит в модели
+        self.show_model = False
+        self.editor.buttons["mdl_show"].Click += self.on_model_toggle
         self.zeditor = ZoneEditor(self.window, self.cnvElev, self.cnvElevFields, lambda: self.on_edit("zones"))
         self.zeditor.build(ELEV_FIELDS)
 
@@ -865,6 +905,7 @@ class BeamsWindow(ui.KzhWindow):
         for g in groups:
             g.opts = dict(SECTION_DEFAULTS)
             g.opts.update(dict((k, v) for k, v in (saved.get("section") or {}).items() if k in g.opts))
+            g.opts["details"] = [dict(d) for d in (saved.get("section") or {}).get("details") or []]
             g.zones = default_zones(mm(g.items[0][1].length), float(g.h), g.opts["d_bot"])
         self.load_length(saved.get("length") or {})
         self.cbGroup.ItemsSource = groups
@@ -973,6 +1014,7 @@ class BeamsWindow(ui.KzhWindow):
         if self.current is not None:
             self.read_all()
         self.current = g
+        self.picker.reset()
         self._loading = True
         try:
             self.zeditor.set_zones(g.zones)
@@ -1006,8 +1048,13 @@ class BeamsWindow(ui.KzhWindow):
                 self.editor.set_hint("nf_" + key, u"у каждой грани свеса, от кромки к ребру")
                 self.editor.set_hint("sf_" + key, u"" if g.opts["sf_" + key] else
                                      u"пусто — {:.0f} (практика)".format(float(calc.flange_step)))
-            lay, targets = draw_section(self.cnvSection, calc, g, self.editor.pad())
+            lay, targets, sk = draw_section(self.cnvSection, calc, g, self.editor.pad())
             self.editor.set_hint("ties", ties_text(g.opts, lay))
+            targets["details"] = self.picker.draw(sk, section_bars(lay, g.opts), g.opts.setdefault("details", []))
+            self.editor.buttons["mdl_show"].Content = u"Вернуть расчёт окна" if self.show_model else u"Показать из модели"
+            if self.show_model and self.refresh_model(g, calc):
+                targets = model_rebar.stacked(self.editor)
+            targets["model"] = model_rebar.TARGET
             self.editor.place(targets)
             self.zeditor.set_hint("first_offset", u"" if ho["first_offset"] is not None else
                                   u"пусто — {:.0f}".format(float(calc.first_offset)))
@@ -1036,6 +1083,26 @@ class BeamsWindow(ui.KzhWindow):
                                 u"Хомуты полок — с шагом из раздела «Сечение» по всей длине. "
                                 u"Вид — по первой балке группы, опоры найдены по геометрии.")
         self.tbInfo.Text = calc.info_text()
+
+    def on_model_toggle(self, sender, args):
+        self.show_model = not self.show_model
+        self.refresh()
+
+    def refresh_model(self, g, calc):
+        """Сечение в середине пролёта по арматуре из модели (первая балка группы, у которой она есть).
+        False — показать нечего."""
+        for beam, sec in g.items:
+            if kr.host_rebar_ids(beam):
+                break
+        else:
+            self.editor.set_hint("mdl", u"У балок этой группы в модели арматуры нет.")
+            return False
+        bars, loops, summary = model_rebar.section(doc, beam, sec.point, 0, sec.length / 2.0)
+        model_rebar.draw(self.cnvSection, section_outline(calc.shape, float(g.h)), bars, loops, self.editor.pad(),
+                         (u"b = {:.0f}".format(float(g.b)), u"h = {:.0f}".format(float(g.h))))
+        where = u"{} • сечение в середине пролёта".format(beam_title(beam))
+        self.editor.set_hint("mdl", where + (u" • " + u"; ".join(summary) if summary else u" • в сечении стержней нет"))
+        return True
 
     def on_run(self, sender, args):
         if self.current is not None:

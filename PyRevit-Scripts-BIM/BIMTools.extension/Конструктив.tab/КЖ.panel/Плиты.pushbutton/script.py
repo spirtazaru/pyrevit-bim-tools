@@ -644,7 +644,7 @@ def draw_section(canvas, calc, item, plan, pad):
     P = lambda y, n: (sk.X(y), sk.Y(n))
     for sa, sb in p.chord((x_c, y0 - 50, p.mid(0.0)), (x_c, y1, p.mid(0.0))):
         sk.rect(max(sa[1], y0), n_lo, min(sb[1], y1), n_hi, kd.CONCRETE_EDGE, 1.5, kd.CONCRETE)
-    sk.line(y1, n_lo - 30, y1, n_hi + 30, kd.CONCRETE_EDGE, 0.8, dash=True)
+    sk.break_line(y1, n_lo - 30, y1, n_hi + 30)
     if calc.kind == "deck" and calc.deck_h:
         # Профлист схематично: между гофрами (бетон в гофрах) — гребни листа без бетона
         top = n_lo + calc.deck_h

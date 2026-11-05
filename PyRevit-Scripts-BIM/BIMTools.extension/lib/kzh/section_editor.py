@@ -9,6 +9,8 @@
 короткое пояснение и несколько строк полей. Выноска одна на группу: от внутренней кромки колонки полей к точке
 рисунка, поэтому выноски не пересекают поля (карточки одной колонки выравниваются по ширине).
 Часть: ("num", ключ_параметра, ширина), ("diam", ключ_параметра), ("combo", ключ_параметра, [Option]),
+("button", ключ, подпись) — кнопка (окно подписывается на self.buttons[ключ].Click), ("panel", ключ) — пустая
+панель, которую окно заполняет само (self.panels[ключ], например список поставленных деталей),
 ("hint", ключ_параметра) — серая подпись, которую окно меняет через set_hint (например, значение по норме
 для пустого поля), или просто текст-подпись. Сторона: "L" — слева, "R" — справа, "B" — снизу, "T" — сверху
 (снизу и сверху — рядами под целями выносок, с переносом, если не помещаются по ширине).
@@ -28,7 +30,7 @@ from kzh import drawing as kd
 from kzh import norms
 from kzh.ui import Option, number_text, parse_number, select_option, selected_value
 
-LEADER = "#FF000000"      # выноски и подсказки — чёрные, как на чертеже
+LEADER = "#FFFF7A1A"      # выноски от карточек полей — элемент интерфейса, не чертежа: оранжевые
 GAP = 8.0             # минимальный зазор между полями одной стороны, px
 EDGE = 10.0           # отступ полей от края холста, px
 NOTE_W = 250.0        # ширина пояснения в карточке, px
@@ -57,6 +59,8 @@ class SectionEditor(object):
         self.hints = {}        # ключ параметра -> серая подпись
         self.titles = {}       # ключ карточки -> заголовок
         self.notes = {}        # ключ карточки -> пояснение (скрывается, если колонка не помещается по высоте)
+        self.buttons = {}      # ключ -> Button
+        self.panels = {}       # ключ -> StackPanel, заполняемая окном
         self._leaders = []
         self._loading = False
 
@@ -121,6 +125,19 @@ class SectionEditor(object):
                         hint.MaxWidth = NOTE_W + 40
                     self.hints[part[1]] = hint
                     stack.Children.Add(hint)
+                elif kind == "button":
+                    btn = Button()
+                    btn.Style = self._style('GlassButton')
+                    btn.Content = part[2]
+                    btn.Height = 32.0
+                    btn.FontSize = 12.0
+                    self.buttons[part[1]] = btn
+                    row.Children.Add(btn)
+                elif kind == "panel":
+                    panel = StackPanel()
+                    panel.Margin = Thickness(0, 2, 0, 0)
+                    self.panels[part[1]] = panel
+                    stack.Children.Add(panel)
                 elif kind == "diam":
                     opts = [Option(u"{}".format(d), d) for d in norms.diameters()]
                     row.Children.Add(self._combo(part[1], opts, 84.0))

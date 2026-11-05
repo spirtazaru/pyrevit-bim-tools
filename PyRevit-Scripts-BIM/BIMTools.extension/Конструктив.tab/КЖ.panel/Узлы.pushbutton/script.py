@@ -939,8 +939,8 @@ class SlabWallNode(object):
         sk.rect(-t / 2.0, z_lo, t / 2.0, zb, kd.CONCRETE_EDGE, 1.5, kd.CONCRETE)
         sk.rect(s_lo, zb, s_hi, zt, kd.CONCRETE_EDGE, 1.5, kd.CONCRETE)
         sk.line(-t / 2.0, zb, t / 2.0, zb, kd.CONCRETE, 2.0)
-        sk.line(s_hi, zb - 20, s_hi, zt + 20, kd.CONCRETE_EDGE, 0.8, dash=True)
-        sk.line(-t / 2.0 - 20, z_lo, t / 2.0 + 20, z_lo, kd.CONCRETE_EDGE, 0.8, dash=True)
+        sk.break_line(s_hi, zb - 20, s_hi, zt + 20)
+        sk.break_line(-t / 2.0 - 20, z_lo, t / 2.0 + 20, z_lo)
         n_mid = (W.n_lo + W.n_hi) / 2.0
         sgn = sign(dot(W.en, m))
         for side in (1.0, -1.0):
@@ -1052,7 +1052,7 @@ class ColumnFoundationNode(object):
         half = col.b / 2.0
         sk.rect(-half, col.z0, half, z_hi - 100, kd.CONCRETE_EDGE, 1.5, kd.CONCRETE)
         sk.line(-half, self.zf1, half, self.zf1, kd.CONCRETE, 2.0)
-        sk.line(-half - 20, z_hi - 100, half + 20, z_hi - 100, kd.CONCRETE_EDGE, 0.8, dash=True)
+        sk.break_line(-half - 20, z_hi - 100, half + 20, z_hi - 100)
         sk.line(u0 + 40, z_foot - d / 2.0 - 16, u1 - 40, z_foot - d / 2.0 - 16, kd.SECOND, 1.0, dash=True)
         targets = {}
         to_uz = lambda q: (dot(sub(q[:2], col.c), col.ax), q[2])
