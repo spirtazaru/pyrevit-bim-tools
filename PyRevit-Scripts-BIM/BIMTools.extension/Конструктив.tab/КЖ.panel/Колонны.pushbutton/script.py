@@ -37,7 +37,7 @@ from kzh import element_name, ui
 from kzh import runner
 from kzh import drawing as kd
 from kzh import details as kdet
-from kzh.detail_picker import CARD as DETAILS_CARD, DetailPicker
+from kzh.detail_picker import DetailPicker, card as details_card
 from kzh import model_rebar
 from kzh import geometry as kg
 from kzh import norms, settings
@@ -64,6 +64,10 @@ JOINT_TEXT = {
     JOINT_BEND: u"загиб в плиту",
     JOINT_FLUSH: u"без выпуска",
 }
+# Низ стержней монолитной колонны
+BOTTOM_BASE = "base"     # от низа колонны: стык с выпусками из конструкции ниже
+BOTTOM_DOWN = "down"     # заход вниз в нижнюю конструкцию (фундамент) на длину анкеровки или заданную
+BOTTOM_COVER = "cover"   # обрыв над низом колонны с защитным слоем
 JOINT_ROLE = {JOINT_LAP: "straight", JOINT_CRANK: "crank", JOINT_BEND: "L", JOINT_FLUSH: "straight"}
 
 TIES_AUTO, TIES_EACH, TIES_OTHER, TIES_NONE = "auto", "each", "other", "none"
@@ -75,6 +79,7 @@ HEIGHT_DEFAULTS = {
     "steel": u"А500", "st_steel": u"А240", "concrete": u"В25", "cover_cond": "indoor_normal",
     "build": MONO, "joint": JOINT_LAP, "compressed": False, "lap": None, "cut_by_slab": True,
     "first_offset": None, "top_offset": None, "hook": None, "tie_hook": None,
+    "bottom": BOTTOM_BASE, "bot_len": None,
 }
 # Раскладка в сечении участка (как в ЛИРА): угловые верх/низ, промежуточные верх/низ (у граней b),
 # боковые (у граней h, обе стороны), защитные слои по СП 63 до поверхности продольных стержней:
@@ -404,7 +409,7 @@ def stirrup_loop(calc, sec, z, ds):
         r = ft(lay.stirrup_r)
         pt = lambda a: sec.point(r * math.cos(a), r * math.sin(a), z)
         arc = lambda a0, a1: DB.Arc.Create(pt(a0), pt(a1), pt((a0 + a1) / 2.0))
-        if calc.ho["hook"]:
+        if kdet.hook_angle(library(), calc.ho["hook"]):     # хомут из «Деталей» с крюками
             return [arc(0.0, math.radians(355))]
         ho = calc.ho
         lap = norms.lap_length(ds, ho["st_steel"], ho["concrete"], False)
@@ -459,7 +464,13 @@ def plan_long(calc, prof, run, is_bottom, is_top, slab, role, specs):
     # Низ: у нижнего прохода — низ колонны (монолит) или защитный слой у торца (сборная);
     # у прохода над консолью/ступенью — заход вниз на длину анкеровки
     if is_bottom:
-        z_start = prof.z_bot + (c_end if ho["build"] == PRECAST else 0.0)
+        bottom = ho.get("bottom") or BOTTOM_BASE
+        if ho["build"] == PRECAST or bottom == BOTTOM_COVER:
+            z_start = prof.z_bot + c_end
+        elif bottom == BOTTOM_DOWN:
+            z_start = prof.z_bot - ft(ho.get("bot_len") or calc.anchorage(d_max))
+        else:
+            z_start = prof.z_bot
     else:
         z_start = max(prof.z_bot + c_end, run.first.z0 - ft(calc.anchorage(d_max)))
     # Верх: у верхнего прохода — по типу стыка (монолит) или защитный слой у торца (сборная);
@@ -551,6 +562,7 @@ def plan_details(calc, sec, z, ds, layout, count, specs):
     lay = Layout(calc, mm(sec.b), mm(sec.h), ds)
     n = 0
     placed = kdet.placed(calc.so.get("details"), section_bars(lay, calc.so), library())[0]
+    placed = [q for q in placed if not duplicates_auto_tie(q, lay, calc.so)]
     for (det, pts, closed, _), off in zip(placed, kdet.offsets([q[0] for q in placed], ds)):
         zd = z + ft(off)
         curves = kr.polyline([sec.point(ft(u), ft(v), zd) for u, v in pts])
@@ -558,6 +570,30 @@ def plan_details(calc, sec, z, ds, layout, count, specs):
         specs.append(spec)
         n += count
     return n
+
+
+def auto_tie_axes(lay):
+    """Оси автоматических шпилек в сечении [((u0, v0), (u1, v1))], мм — те же стержни, что в plan_ties."""
+    out = [((-lay.u_side, lay.v_side[i]), (lay.u_side, lay.v_side[i])) for i in lay.tie_side]
+    for i in lay.tie_mid:
+        u = (lay.u_top[i] + lay.u_bot[i]) / 2.0
+        out.append(((u, lay.v_mid_b), (u, lay.v_mid_t)))
+    return out
+
+
+def duplicates_auto_tie(placed_item, lay, so):
+    """Шпилька из «Деталей», поставленная на те же стержни, что и автоматическая, — дубль (не ставится)."""
+    det, pts = placed_item[0], placed_item[1]
+    if det["kind"] != "pin" or so.get("ties") == TIES_NONE or len(pts) != 2:
+        return False
+    (a0, a1), (b0, b1) = pts[0], pts[1]
+    for (u0, v0), (u1, v1) in auto_tie_axes(lay):
+        # Ось ручной шпильки длиннее оси автоматической на радиусы — сравниваем направление и положение
+        same_line = abs((u1 - u0) * (b1 - a1) - (v1 - v0) * (b0 - a0)) < 1.0 * max(math.hypot(u1 - u0, v1 - v0), 1.0)
+        mid_close = math.hypot((a0 + b0 - u0 - u1) / 2.0, (a1 + b1 - v0 - v1) / 2.0) < 5.0
+        if same_line and mid_close:
+            return True
+    return False
 
 
 def plan_ties(calc, sec, z, ds, layout, count, specs):
@@ -667,10 +703,17 @@ def plan_corbels(prof, part, cc, specs):
                                 ("fixed", n, span) if n > 1 else None, n))
         n_top += n
         # Горизонтальные хомуты от низа зоны до верха: обходят консоль(и) и сечение колонны
+        def inset(k, z):
+            """Отступ оси хомута от торца консоли на отметке z: у наклонной грани защитный слой меряется по
+            нормали к ней (СП 63, п. 10.3.2), поэтому горизонтальный отступ больше в sqrt(1 + уклон²) раз."""
+            dz = ft(ds)
+            slope = max(abs(k.reach_at(z + dz) - k.reach_at(z)), abs(k.reach_at(z) - k.reach_at(z - dz))) / dz
+            return (c - ft(ds) / 2.0) * math.sqrt(1.0 + slope * slope)
+
         z = part.z0 + c
         while z <= part.z1 - c + 1e-6:
-            ea = (lo_k.face - lo_k.reach_at(z) if lo_k else a0) + c - ft(ds) / 2.0
-            eb = (hi_k.face + hi_k.reach_at(z) if hi_k else a1) - c + ft(ds) / 2.0
+            ea = (lo_k.face - lo_k.reach_at(z) + inset(lo_k, z)) if lo_k else a0 + c - ft(ds) / 2.0
+            eb = (hi_k.face + hi_k.reach_at(z) - inset(hi_k, z)) if hi_k else a1 - c + ft(ds) / 2.0
             fa, fb = w0 + c - ft(ds) / 2.0, w1 - c + ft(ds) / 2.0
             corners = [(ea, fa), (eb, fa), (eb, fb), (ea, fb), (ea, fa)]
             if axis == 1:
@@ -759,7 +802,7 @@ def reinforce(groups, ho, skipped):
                 skipped.append(u"{} — {}".format(column_title(g.items[i][0]), reason))
             else:
                 plans.append(plan)
-    hooks = {"stirrup": runner.find_hook(doc, ho["hook"]), "pin": runner.find_hook(doc, ho["tie_hook"])}
+    hooks = runner.hooks_from_details(doc, library(), ho["hook"], ho["tie_hook"])
     runner.run(doc, plans, skipped, warnings, ho["steel"], ho["st_steel"], hooks, PART_NAME, WHAT)
 
 
@@ -939,7 +982,11 @@ def draw_elevation(canvas, ho, group, calc_of, pad):
     top = mm(z_ref - prof.z_bot)
     if ho["build"] == MONO and ho["joint"] in (JOINT_LAP, JOINT_CRANK):
         top += calc0.lap(d_max) + norms.crank_rise(d_max)
-    sk = kd.Sketch(canvas, (min(us) - 150, -100.0, max(us) + 150, top + 100.0), pad=pad, min_width_px=170)
+    # Заход стержней вниз (в фундамент) — рисунок продолжается ниже колонны
+    down = 0.0
+    if ho["build"] == MONO and ho.get("bottom") == BOTTOM_DOWN:
+        down = ho.get("bot_len") or calc0.anchorage(d_max)
+    sk = kd.Sketch(canvas, (min(us) - 150, -100.0 - down, max(us) + 150, top + 100.0), pad=pad, min_width_px=170)
     if slab is not None:
         sk.rect(min(us) - 300, mm(slab[0] - prof.z_bot), max(us) + 300, mm(slab[1] - prof.z_bot),
                 kd.CONCRETE_EDGE, 1.0, kd.SLAB, dash=True)
@@ -998,6 +1045,9 @@ def draw_elevation(canvas, ho, group, calc_of, pad):
             targets[u"zone_{}".format(i)] = (sk.X(x_chain), sk.Y(z3), False)
     targets["zone_add"] = (sk.X(x_chain), sk.Y(z3) - 40, False)
     sk.dim(min(us), 0, min(us), H, u"{:.0f}".format(float(H)))
+    if down:
+        sk.line(min(us) - 120, 0, max(us) + 120, 0, kd.CONCRETE_EDGE, 1.0, dash=True)
+        sk.dim(max(us), -down, max(us), 0, u"{:.0f}".format(float(down)), outside="right")
     # Отступы хомутов — выноски к первому и последнему хомуту у левой грани участка
     face = lambda part: mm((part.sec.center - prof.origin).DotProduct(prof.ax) - part.sec.b / 2.0)
     shafts = prof.shafts
@@ -1055,9 +1105,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • КОЛОННЫ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navSection" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
-                                <RadioButton Name="navHeight" GroupName="nav" Style="{StaticResource NavItem}" Content="По высоте"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navSection" ToolTip="Раскладка стержней в сечении участка: стержни, хомуты, детали, защитные слои" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
+                                <RadioButton Name="navHeight" ToolTip="Зоны хомутов по высоте, отступы первого и последнего хомута, нахлёст выпусков" GroupName="nav" Style="{StaticResource NavItem}" Content="По высоте"/>
+                                <RadioButton Name="navParams" ToolTip="Тип колонны, верх и низ стержней, материалы, хомут и шпилька из «Деталей»" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -1140,8 +1190,8 @@ __TITLEBAR__
                                         <StackPanel>
                                             <TextBlock Text="Колонна" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
                                             <WrapPanel>
-                                                <RadioButton Name="rbMono" GroupName="build" Style="{StaticResource ModePill}" Content="Монолитная" Margin="0,0,8,6"/>
-                                                <RadioButton Name="rbPrecast" GroupName="build" Style="{StaticResource ModePill}" Content="Сборная" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbMono" ToolTip="Монолитная: стержни с выпусками для стыка с колонной выше" GroupName="build" Style="{StaticResource ModePill}" Content="Монолитная" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbPrecast" ToolTip="Сборная: стержни обрываются у обоих торцов с защитным слоем" GroupName="build" Style="{StaticResource ModePill}" Content="Сборная" Margin="0,0,8,6"/>
                                             </WrapPanel>
                                             <TextBlock Style="{StaticResource Hint}" Text="Сборная: без выпусков и подрезки по плите, стержни обрываются у обоих торцов с защитным слоем."/>
                                         </StackPanel>
@@ -1150,13 +1200,37 @@ __TITLEBAR__
                                         <StackPanel>
                                             <TextBlock Text="Верх стержней" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
                                             <WrapPanel>
-                                                <RadioButton Name="rbLap" GroupName="joint" Style="{StaticResource ModePill}" Content="Прямой выпуск" Margin="0,0,8,6"/>
-                                                <RadioButton Name="rbCrank" GroupName="joint" Style="{StaticResource ModePill}" Content="С отгибом" Margin="0,0,8,6"/>
-                                                <RadioButton Name="rbBend" GroupName="joint" Style="{StaticResource ModePill}" Content="Загиб в плиту" Margin="0,0,8,6"/>
-                                                <RadioButton Name="rbFlush" GroupName="joint" Style="{StaticResource ModePill}" Content="Без выпуска" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbLap" ToolTip="Стержни выходят над колонной на длину нахлёста" GroupName="joint" Style="{StaticResource ModePill}" Content="Прямой выпуск" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbCrank" ToolTip="Выпуск с отгибом внутрь на один диаметр — стык без смещения осей" GroupName="joint" Style="{StaticResource ModePill}" Content="С отгибом" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbBend" ToolTip="Стержни загибаются в плиту над колонной (верхний этаж)" GroupName="joint" Style="{StaticResource ModePill}" Content="Загиб в плиту" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbFlush" ToolTip="Стержни обрываются под верхом с защитным слоем" GroupName="joint" Style="{StaticResource ModePill}" Content="Без выпуска" Margin="0,0,8,6"/>
                                             </WrapPanel>
                                             <ComboBox Name="cbStress" Style="{StaticResource PillComboBox}" Tag="Стык:" Margin="0,2,0,8"/>
                                             <CheckBox Name="chkSlab" Style="{StaticResource PillCheck}" Content="Подрезка по плите над колонной"/>
+                                            <Grid Name="grLap" Margin="0,8,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="170"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Длина выпуска, мм" Style="{StaticResource FieldLabel}"/>
+                                                <TextBox Name="tbLap" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
+                                            </Grid>
+                                            <TextBlock Name="tbLapHint" Style="{StaticResource Hint}"/>
+                                            <TextBlock Text="Низ стержней" FontSize="16" FontWeight="Bold" Margin="0,14,0,8"/>
+                                            <WrapPanel>
+                                                <RadioButton Name="rbBotBase" ToolTip="Стержни начинаются у низа колонны — стык с выпусками конструкции ниже" GroupName="bottom" Style="{StaticResource ModePill}" Content="От низа колонны" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbBotDown" ToolTip="Стержни заходят ниже колонны (в фундамент) на длину анкеровки или заданную" GroupName="bottom" Style="{StaticResource ModePill}" Content="Заход вниз" Margin="0,0,8,6"/>
+                                                <RadioButton Name="rbBotCover" ToolTip="Стержни обрываются над низом колонны с защитным слоем" GroupName="bottom" Style="{StaticResource ModePill}" Content="С защитным слоем" Margin="0,0,8,6"/>
+                                            </WrapPanel>
+                                            <Grid Name="grBotLen" Margin="0,2,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="170"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Заход вниз, мм" Style="{StaticResource FieldLabel}"/>
+                                                <TextBox Name="tbBotLen" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
+                                            </Grid>
+                                            <TextBlock Name="tbBotHint" Style="{StaticResource Hint}"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{StaticResource GlassCard}" Padding="16,12" Margin="0,0,10,10">
@@ -1170,7 +1244,8 @@ __TITLEBAR__
                                     </Border>
                                     <Border Style="{StaticResource GlassCard}" Padding="16,12" Margin="0,0,10,10">
                                         <StackPanel>
-                                            <TextBlock Text="Отгибы" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
+                                            <TextBlock Text="Хомут и шпилька" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
+                                            <TextBlock Style="{StaticResource Hint}" Text="Хомут и шпилька — детали из библиотеки «Детали»: крюки берутся из выбранной детали." Margin="0,0,0,6"/>
                                             <ComboBox Name="cbHook" Style="{StaticResource PillComboBox}" Tag="Хомуты:" Margin="0,0,0,6"/>
                                             <ComboBox Name="cbTieHook" Style="{StaticResource PillComboBox}" Tag="Шпильки:"/>
                                         </StackPanel>
@@ -1185,7 +1260,7 @@ __TITLEBAR__
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Name="tbInfo" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
-                            <Button Name="btnRun" Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnRun" ToolTip="Создать арматуру по настройкам окна. Сначала — список элементов и подтверждение; старая арматура удаляется только после отдельного подтверждения." Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>
@@ -1197,7 +1272,8 @@ __TITLEBAR__
 CONTROL_NAMES = (
     "tbCount", "tbDoc", "cbGroup", "btnSkipped", "cbPart", "cnvSection", "cnvFields", "tbSectionInfo",
     "cnvElev", "cnvElevFields", "tbElevInfo", "rbMono", "rbPrecast", "bdJoint", "rbLap", "rbCrank", "rbBend",
-    "rbFlush", "cbStress", "chkSlab", "cbSteel", "cbStSteel", "cbConcrete", "cbCover", "cbHook", "cbTieHook",
+    "rbFlush", "cbStress", "chkSlab", "grLap", "tbLap", "tbLapHint", "rbBotBase", "rbBotDown", "rbBotCover",
+    "grBotLen", "tbBotLen", "tbBotHint", "cbSteel", "cbStSteel", "cbConcrete", "cbCover", "cbHook", "cbTieHook",
     "tbInfo", "btnRun",
 )
 NAV_PAGES = (("navSection", "pageSection"), ("navHeight", "pageHeight"), ("navParams", "pageParams"))
@@ -1224,11 +1300,7 @@ SECTION_FIELDS = [
     ("stirrup", "R", {"title": u"Хомуты",
                       "note": u"Ø и шаг основной зоны. Зоны с другим шагом (учащение у узлов) — в разделе «По высоте».",
                       "rows": [[u"Ø", ("diam", "ds"), u"шаг", ("num", "step", 52), u"мм"], [("hint", "step")]]}),
-    ("ties", "R", {"title": u"Шпильки",
-                   "note": u"Закрепляют промежуточные стержни: по СП 63 — при грани шире 400 мм или более 4 стержней у грани.",
-                   "rows": [[("combo", "ties", [Option(t, k) for k, t in TIES_OPTIONS], 220)], [u"Ø", ("diam", "dt")],
-                            [("hint", "ties")]]}),
-    DETAILS_CARD,
+    details_card([Option(t, k) for k, t in TIES_OPTIONS]),
     model_rebar.CARD,
     # Круглая колонна
     ("bars", "L", {"title": u"Продольные стержни", "note": u"Равномерно по окружности.",
@@ -1243,7 +1315,7 @@ SECTION_FIELDS = [
                       "rows": [[u"c", ("num", "cc", 46), u"мм"], [("hint", "cc")]]}),
 ]
 VISIBLE_GROUPS = {
-    RECT: ("corner_top", "mid_top", "cover_t", "stirrup", "ties", "details", "model"),
+    RECT: ("corner_top", "mid_top", "cover_t", "stirrup", "details", "model"),
     ROUND: ("bars", "stirrup", "cover", "model"),
     "corbel": ("c_top", "c_stir", "c_cover"),
 }
@@ -1279,6 +1351,7 @@ class ColumnsWindow(ui.KzhWindow):
         self.tbDoc.Text = doc.Title
         self.joint_buttons = ((self.rbLap, JOINT_LAP), (self.rbCrank, JOINT_CRANK),
                               (self.rbBend, JOINT_BEND), (self.rbFlush, JOINT_FLUSH))
+        self.bottom_buttons = ((self.rbBotBase, BOTTOM_BASE), (self.rbBotDown, BOTTOM_DOWN), (self.rbBotCover, BOTTOM_COVER))
         self.btnSkipped.Content = u"Не поддерживается: {}".format(len(skipped))
         self.btnSkipped.Visibility = Visibility.Visible if skipped else Visibility.Collapsed
         self.btnSkipped.Click += lambda s, e: show_message(
@@ -1288,6 +1361,7 @@ class ColumnsWindow(ui.KzhWindow):
         self._src = "section"     # где был последний ввод: хомут Ø/S есть и в сечении, и в зонах по высоте
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, lambda: self.on_edit("section"))
         self.editor.build(SECTION_FIELDS)
+        self.editor.pinned = ["details", "model"]     # не прыгают при смене режима
         # Детали из конфигуратора: выбор в списке, щелчки по стержням рисунка
         self.picker = DetailPicker(self.window, self.editor, self.cnvSection, library(),
                                    lambda: self.current.part_opts[self.part].setdefault("details", []), self.refresh)
@@ -1302,9 +1376,12 @@ class ColumnsWindow(ui.KzhWindow):
         self.cbStSteel.ItemsSource = steel()
         self.cbConcrete.ItemsSource = [Option(c, c) for c in norms.concrete_classes()]
         self.cbCover.ItemsSource = [Option(u"{} — {} мм".format(t, v), k) for k, t, v in norms.cover_conditions()]
-        hook_names = [element_name(h) for h in kr.hook_types(doc)]
-        self.cbHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
-        self.cbTieHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
+        # Хомут и шпилька — детали библиотеки «Детали» (крюки задаются в детали)
+        self.lib = library()
+        self.cbHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "stirrup")]
+        self.cbTieHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "pin")]
         self.cbStress.ItemsSource = [Option(u"растянутая (α = 1,2)", False), Option(u"сжатая (α = 0,9)", True)]
 
         saved = settings.load(SETTINGS_SECTION)
@@ -1333,8 +1410,11 @@ class ColumnsWindow(ui.KzhWindow):
 
         for cb in (self.cbSteel, self.cbStSteel, self.cbConcrete, self.cbCover, self.cbStress, self.cbHook):
             cb.SelectionChanged += lambda s, e: self.refresh()
-        for rb, _ in self.joint_buttons:
+        for rb, _ in self.joint_buttons + self.bottom_buttons:
             rb.Checked += lambda s, e: self.refresh()
+        # Длина выпуска — то же значение, что «Нахлёст» на виде «По высоте»: поля синхронны
+        self.tbLap.TextChanged += lambda s, e: self.on_lap_text(self.tbLap)
+        self.tbBotLen.LostFocus += lambda s, e: self.refresh()
         for rb in (self.rbMono, self.rbPrecast):
             rb.Checked += lambda s, e: self.refresh()
         self.chkSlab.Click += lambda s, e: self.refresh()
@@ -1348,21 +1428,25 @@ class ColumnsWindow(ui.KzhWindow):
     def load_height(self, saved):
         o = dict(HEIGHT_DEFAULTS)
         o.update(dict((k, v) for k, v in saved.items() if k in o))
-        default_hook = kr.default_stirrup_hook(doc)
-        default_hook = element_name(default_hook) if default_hook is not None else u""
+        # Пусто — без крюков; не деталь библиотеки (старые настройки — имя типа отгиба) — деталь по умолчанию
+        pick = lambda value, kind: value if value == u"" or kdet.find(self.lib, value) else kdet.default_name(self.lib, kind)
         ui.select_option(self.cbSteel, o["steel"])
         ui.select_option(self.cbStSteel, o["st_steel"])
         ui.select_option(self.cbConcrete, o["concrete"])
         ui.select_option(self.cbCover, o["cover_cond"])
         ui.select_option(self.cbStress, o["compressed"])
-        ui.select_option(self.cbHook, default_hook if o["hook"] is None else o["hook"])
-        ui.select_option(self.cbTieHook, default_hook if o["tie_hook"] is None else o["tie_hook"])
+        ui.select_option(self.cbHook, pick(o["hook"], "stirrup"))
+        ui.select_option(self.cbTieHook, pick(o["tie_hook"], "pin"))
         self.zeditor.load({"first_offset": o["first_offset"], "top_offset": o["top_offset"], "lap": o["lap"]})
         self.chkSlab.IsChecked = bool(o["cut_by_slab"])
         self.rbMono.IsChecked = o["build"] != PRECAST
         self.rbPrecast.IsChecked = o["build"] == PRECAST
         for rb, key in self.joint_buttons:
             rb.IsChecked = key == o["joint"]
+        for rb, key in self.bottom_buttons:
+            rb.IsChecked = key == o["bottom"]
+        self.tbLap.Text = ui.number_text(o["lap"])
+        self.tbBotLen.Text = ui.number_text(o["bot_len"])
 
     def read_height(self):
         v = {}
@@ -1376,7 +1460,15 @@ class ColumnsWindow(ui.KzhWindow):
             "cut_by_slab": bool(self.chkSlab.IsChecked),
             "first_offset": v["first_offset"], "top_offset": v["top_offset"],
             "hook": ui.selected_value(self.cbHook, u""), "tie_hook": ui.selected_value(self.cbTieHook, u""),
+            "bottom": next((key for rb, key in self.bottom_buttons if rb.IsChecked), BOTTOM_BASE),
+            "bot_len": ui.parse_number(self.tbBotLen.Text),
         }
+
+    def on_lap_text(self, source):
+        """Длина выпуска в «Параметрах» -> поле «Нахлёст» на виде по высоте (и наоборот в refresh_elevation)."""
+        lap = self.zeditor.inputs["lap"][1]
+        if lap.Text != source.Text:
+            lap.Text = source.Text
 
     @staticmethod
     def fill_zone(g):
@@ -1511,6 +1603,7 @@ class ColumnsWindow(ui.KzhWindow):
             return
         ho = self.read_height()
         self.bdJoint.Visibility = Visibility.Collapsed if ho["build"] == PRECAST else Visibility.Visible
+        self.refresh_outlets(g, ho)
         try:
             self.refresh_section(g, ho)
             self.refresh_elevation(g, ho)
@@ -1551,8 +1644,11 @@ class ColumnsWindow(ui.KzhWindow):
         self.editor.set_hint("step", u"основная зона по высоте")
         lay, targets, sk = draw_section(self.cnvSection, calc, part.sec, self.editor.pad())
         if part_kind(part) == RECT:
-            self.editor.set_hint("ties", ties_text(so, lay))
             targets["details"] = self.picker.draw(sk, section_bars(lay, so), so.setdefault("details", []))
+            dupes = [q for q in kdet.placed(so["details"], section_bars(lay, so), library())[0]
+                     if duplicates_auto_tie(q, lay, so)]
+            self.editor.set_hint("ties", ties_text(so, lay) + (
+                u" • ручных шпилек на тех же стержнях: {} — не ставятся (дубль)".format(len(dupes)) if dupes else u""))
         targets["model"] = model_rebar.TARGET
         self.editor.place(targets)
         info = u"Стержней: {} • As = {:.1f} см² • μ = {:.2f} %".format(lay.count, float(lay.area / 100.0), float(lay.mu))
@@ -1562,6 +1658,27 @@ class ColumnsWindow(ui.KzhWindow):
         if notes:
             info += u" • Внимание: " + u"; ".join(notes)
         self.tbSectionInfo.Text = info
+
+    def refresh_outlets(self, g, ho):
+        """Поля выпуска и низа стержней в «Параметрах»: видимость по режиму и значения по норме для пустых."""
+        calc0 = self.calc_of(g, 0)
+        dmax = max(calc0.diams)
+        lap_field = self.zeditor.inputs["lap"][1]
+        if self.tbLap.Text != lap_field.Text:          # правка на виде по высоте -> сюда
+            self.tbLap.Text = lap_field.Text
+        show_lap = ho["joint"] in (JOINT_LAP, JOINT_CRANK)
+        self.grLap.Visibility = Visibility.Visible if show_lap else Visibility.Collapsed
+        self.tbLapHint.Visibility = self.grLap.Visibility
+        self.tbLapHint.Text = (u"Над верхом колонны (или плиты). Пусто — нахлёст по СП 63: {:.0f} мм (⌀{})".format(
+            float(norms.lap_length(dmax, ho["steel"], ho["concrete"], ho["compressed"])), dmax))
+        down = ho["bottom"] == BOTTOM_DOWN
+        self.grBotLen.Visibility = Visibility.Visible if down else Visibility.Collapsed
+        self.tbBotHint.Text = {
+            BOTTOM_BASE: u"Стержни начинаются у низа колонны — стык с выпусками конструкции ниже.",
+            BOTTOM_DOWN: u"Стержни заходят ниже колонны (например, в фундамент). Пусто — анкеровка по СП 63: "
+                         u"{:.0f} мм (⌀{}).".format(float(calc0.anchorage(dmax)), dmax),
+            BOTTOM_COVER: u"Стержни обрываются над низом колонны с защитным слоем {:.0f} мм.".format(float(calc0.cover_end)),
+        }[ho["bottom"]]
 
     def refresh_elevation(self, g, ho):
         calc0 = self.calc_of(g, 0)

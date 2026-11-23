@@ -97,6 +97,24 @@ def title(det):
     return det["name"]
 
 
+def of_kind(items, kind):
+    """Детали библиотеки одного типа (например, все хомуты) — для выбора в окнах армирования."""
+    return [d for d in items if d["kind"] == kind]
+
+
+def hook_angle(items, name):
+    """Угол крюка детали name (градусы); 0 — нет такой детали или она без крюков."""
+    det = find(items, name)
+    return int(det.get("hook") or 0) if det else 0
+
+
+def default_name(items, kind):
+    """Деталь типа kind по умолчанию: первая с крюками, иначе первая; u"" — таких деталей нет."""
+    dets = of_kind(items, kind)
+    with_hooks = [d for d in dets if d.get("hook")]
+    return (with_hooks or dets or [{"name": u""}])[0]["name"]
+
+
 # ----------------------------------------------------------
 # ЭСКИЗ ДЛЯ ВЕДОМОСТИ ДЕТАЛЕЙ
 # ----------------------------------------------------------
@@ -223,13 +241,6 @@ def _offset(poly, dist):
             continue
         t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / den
         q = (p1[0] + d1[0] * t, p1[1] + d1[1] * t)
-        v = poly[i]
-        if math.hypot(q[0] - v[0], q[1] - v[1]) > 2.0 * dist:
-            # Острый угол: вершина ушла бы далеко за стержень — срез двумя точками у стержня
-            L1 = math.hypot(d1[0], d1[1]) or 1.0
-            out.append((v[0] + d1[1] / L1 * dist, v[1] - d1[0] / L1 * dist))
-            out.append(p2)
-            continue
         out.append(q)
     return out
 
@@ -262,6 +273,10 @@ def place_in_section(det, bars):
     if det.get("close") == "overlap":
         # Нахлёст: контур не замыкается, конец заходит вдоль первой стороны на длину нахлёста со сдвигом на Ø
         lap = float(det["dims"].get("lap") or 0.0)
+        # Нахлёст — вдоль самой длинной стороны (не вдоль среза острого угла)
+        n = len(loop)
+        k0 = max(range(n), key=lambda i: math.hypot(loop[(i + 1) % n][0] - loop[i][0], loop[(i + 1) % n][1] - loop[i][1]))
+        loop = loop[k0:] + loop[:k0]
         a, b = loop[0], loop[1]
         L = math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0
         ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L

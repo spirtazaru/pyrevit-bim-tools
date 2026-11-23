@@ -44,7 +44,7 @@ from kzh import element_name, ui
 from kzh import runner
 from kzh import drawing as kd
 from kzh import details as kdet
-from kzh.detail_picker import CARD as DETAILS_CARD, DetailPicker
+from kzh.detail_picker import DetailPicker, card as details_card
 from kzh import model_rebar
 from kzh import geometry as kg
 from kzh import norms, settings
@@ -73,7 +73,7 @@ LENGTH_DEFAULTS = {
 # c_t — сверху, c_b — снизу. Полки: nf — стержней у каждой грани свеса, df — их Ø, dsf/sf — хомут полки Ø и шаг.
 # Хомут ребра Ø и шаг S — основная зона хомутов (зона с пустой длиной на виде по длине)
 SECTION_DEFAULTS = {"n_bot": 3, "d_bot": 16, "n_top": 2, "d_top": 12, "n_side": None, "d_side": 12,
-                    "c_s": None, "c_t": None, "c_b": None, "ties": TIES_AUTO, "dt": 8,
+                    "c_s": None, "c_t": None, "c_b": None, "ties": TIES_AUTO, "dt": 8, "contour": True,
                     "nf_t": 2, "df_t": 10, "dsf_t": 8, "sf_t": None,
                     "nf_b": 2, "df_b": 12, "dsf_b": 8, "sf_b": None}
 
@@ -181,6 +181,9 @@ class Calc(object):
                     key, float(c - ds), float(self.cover_st_min)))
         if not self.flat and self.n_side == 0 and norms.beam_side_bars(h, self.covers["c_t"], self.covers["c_b"]) > 0:
             w.append(u"при h > {} мм по СП 63 нужны боковые стержни".format(norms.beam_rule("side_bars")["h_mm"]))
+        if not so.get("contour", True) and not self.flat and not so.get("details"):
+            w.append(u"контурный хомут отключён, а детали в сечении не поставлены — продольные стержни не охвачены "
+                     u"поперечной арматурой (СП 63, п. 10.3.11–10.3.13)")
         if shape.taper >= 3:
             w.append(u"стенка переменной ширины ({:.0f} мм) — раскладка по наименьшей".format(float(shape.taper)))
 
@@ -408,9 +411,10 @@ def plan_stirrups(calc, sec, length, b, h, specs):
             continue
         loop = [(lay.vc - lay.st_v, lay.st_bot), (lay.vc + lay.st_v, lay.st_bot), (lay.vc + lay.st_v, lay.st_top),
                 (lay.vc - lay.st_v, lay.st_top), (lay.vc - lay.st_v, lay.st_bot)]
-        curves = kr.polyline([sec.point(ft(x), ft(v), ft(t)) for v, t in loop])
-        specs.append(kr.BarSpec("stirrup", d, curves, sec.a, layout, count))
-        n_st += count
+        if so.get("contour", True):
+            curves = kr.polyline([sec.point(ft(x), ft(v), ft(t)) for v, t in loop])
+            specs.append(kr.BarSpec("stirrup", d, curves, sec.a, layout, count))
+            n_st += count
         tie_step = step * int(ho["tie_every"] or 1)
         tie_count = kr.zone_count(zlen, tie_step, first, last)
         xt = x + (d + dt) / 2.0
@@ -485,7 +489,7 @@ def reinforce(groups, ho, skipped):
                 skipped.append(u"{} — {}".format(beam_title(g.items[i][0]), reason))
             else:
                 plans.append(plan)
-    hooks = {"stirrup": runner.find_hook(doc, ho["hook"]), "pin": runner.find_hook(doc, ho["tie_hook"])}
+    hooks = runner.hooks_from_details(doc, library(), ho["hook"], ho["tie_hook"])
     runner.run(doc, plans, skipped, warnings, ho["steel"], ho["st_steel"], hooks, PART_NAME, WHAT)
 
 
@@ -529,7 +533,7 @@ def draw_section(canvas, calc, group, pad):
         sk.rect(va, ta, vb, tb, kd.STIRRUP, max(1.5, fl["ds"] * sk.k))
     if lay.flat:
         sk.line(lay.link_v, cv["c_b"], lay.link_v, h - cv["c_t"], kd.STIRRUP, max(2.0, calc.ds * sk.k))
-    else:
+    elif so.get("contour", True):
         sk.rect(lay.vc - lay.st_v, lay.st_bot, lay.vc + lay.st_v, lay.st_top, kd.STIRRUP, max(2.0, calc.ds * sk.k))
     ext = (so["d_side"] + so["dt"]) / 2.0
     for i in lay.ties:
@@ -693,9 +697,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • БАЛКИ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navSection" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
-                                <RadioButton Name="navLength" GroupName="nav" Style="{StaticResource NavItem}" Content="По длине"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navSection" ToolTip="Раскладка стержней в сечении: верх, низ, бока, полки, хомуты, детали" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
+                                <RadioButton Name="navLength" ToolTip="Зоны хомутов по длине (учащение у опор), отступ первого хомута" GroupName="nav" Style="{StaticResource NavItem}" Content="По длине"/>
+                                <RadioButton Name="navParams" ToolTip="Концы стержней, материалы, хомут и шпилька из «Деталей»" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -766,8 +770,8 @@ __TITLEBAR__
                                     <StackPanel>
                                         <TextBlock Text="Концы верхних и нижних стержней" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
                                         <WrapPanel>
-                                            <RadioButton Name="rbEndsAuto" GroupName="ends" Style="{StaticResource ModePill}" Content="Анкеровка в опору" Margin="0,0,8,6"/>
-                                            <RadioButton Name="rbEndsFlush" GroupName="ends" Style="{StaticResource ModePill}" Content="Обрыв у торца" Margin="0,0,8,6"/>
+                                            <RadioButton Name="rbEndsAuto" ToolTip="Стержни заводятся в опору на длину анкеровки (с загибом, если не помещаются)" GroupName="ends" Style="{StaticResource ModePill}" Content="Анкеровка в опору" Margin="0,0,8,6"/>
+                                            <RadioButton Name="rbEndsFlush" ToolTip="Стержни обрываются у торца балки с защитным слоем" GroupName="ends" Style="{StaticResource ModePill}" Content="Обрыв у торца" Margin="0,0,8,6"/>
                                         </WrapPanel>
                                         <TextBlock Style="{StaticResource Hint}" Text="Опора (колонна, стена, балка) ищется за торцом. Хватает толщины — прямой заход на длину анкеровки, иначе до дальней грани опоры с загибом (нижние — вверх, верхние — вниз, не менее 10d). Нет опоры — обрыв у торца с защитным слоем."/>
                                     </StackPanel>
@@ -783,7 +787,8 @@ __TITLEBAR__
                                 </Border>
                                 <Border Style="{StaticResource GlassCard}" Padding="16,12" Margin="0,0,10,10">
                                     <StackPanel>
-                                        <TextBlock Text="Отгибы и шпильки" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
+                                        <TextBlock Text="Хомут и шпилька" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
+                                        <TextBlock Style="{StaticResource Hint}" Text="Хомут и шпилька — детали из библиотеки «Детали»: крюки берутся из выбранной детали." Margin="0,0,0,6"/>
                                         <ComboBox Name="cbHook" Style="{StaticResource PillComboBox}" Tag="Хомуты:" Margin="0,0,0,6"/>
                                         <ComboBox Name="cbTieHook" Style="{StaticResource PillComboBox}" Tag="Шпильки:" Margin="0,0,0,6"/>
                                         <ComboBox Name="cbTieEvery" Style="{StaticResource PillComboBox}" Tag="Шпильки по длине:"/>
@@ -799,7 +804,7 @@ __TITLEBAR__
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Name="tbInfo" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
-                            <Button Name="btnRun" Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnRun" ToolTip="Создать арматуру по настройкам окна. Сначала — список элементов и подтверждение; старая арматура удаляется только после отдельного подтверждения." Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>
@@ -822,7 +827,7 @@ def _flange_card(key, title):
                      [u"Хомуты Ø", ("diam", "dsf_" + key), u"шаг", ("num", "sf_" + key, 52), u"мм"], [("hint", "sf_" + key)]]}
 
 
-# Раздел «Сечение»: слева — защитные слои, хомуты, шпильки; справа — продольные стержни и полки
+# Раздел «Сечение»: слева — защитные слои и хомуты; справа — детали и шпильки, продольные стержни и полки
 SECTION_FIELDS = [
     ("cover_t", "L", {"title": u"Защитные слои",
                       "note": u"От грани бетона до поверхности продольного стержня. Пусто — по СП 63 для условий из «Параметров».",
@@ -831,10 +836,9 @@ SECTION_FIELDS = [
                                [u"По бокам", ("num", "c_s", 46), u"мм"], [("hint", "c_s")]]}),
     ("stirrup", "L", {"title": u"Хомуты ребра",
                       "note": u"Ø и шаг основной зоны. Зоны с другим шагом (учащение у опор) — в разделе «По длине».",
-                      "rows": [[u"Ø", ("diam", "ds"), u"шаг", ("num", "step", 52), u"мм"], [("hint", "step")]]}),
-    ("ties", "L", {"title": u"Шпильки", "note": u"Поперёк ребра к боковым стержням.",
-                   "rows": [[("combo", "ties", [Option(u"к боковым стержням", TIES_AUTO), Option(u"без шпилек", TIES_NONE)], 200)],
-                            [u"Ø", ("diam", "dt")], [("hint", "ties")]]}),
+                      "rows": [[u"Ø", ("diam", "ds"), u"шаг", ("num", "step", 52), u"мм"], [("hint", "step")],
+                               [("combo", "contour", [Option(u"хомут по контуру", True),
+                                                      Option(u"без контурного (хомуты — детали)", False)], 250)]]}),
     ("top", "R", {"title": u"Верхние стержни ребра", "note": u"У верхней грани, включая угловые.",
                   "rows": [[u"Количество", ("num", "n_top", 40), u"шт. Ø", ("diam", "d_top")], [("hint", "n_top")]]}),
     ("side", "R", {"title": u"Боковые стержни", "note": u"У каждой боковой грани ребра (по СП 63 — при высоте более 700 мм).",
@@ -843,10 +847,10 @@ SECTION_FIELDS = [
                   "rows": [[u"Количество", ("num", "n_bot", 40), u"шт. Ø", ("diam", "d_bot")], [("hint", "n_bot")]]}),
     ("fbars_t", "R", _flange_card("t", u"Полка сверху")),
     ("fbars_b", "R", _flange_card("b", u"Полка снизу")),
-    DETAILS_CARD,
+    details_card([Option(u"к боковым стержням", TIES_AUTO), Option(u"без шпилек", TIES_NONE)]),
     model_rebar.CARD,
 ]
-BASE_GROUPS = ("cover_t", "stirrup", "top", "side", "bot", "ties", "details", "model")
+BASE_GROUPS = ("cover_t", "stirrup", "top", "side", "bot", "details", "model")
 ELEV_FIELDS = [
     ("first", "L", {"title": u"Первый хомут", "note": u"Расстояние от торца балки до первого хомута.",
                     "rows": [[u"Отступ", ("num", "first_offset", 46), u"мм"], [("hint", "first_offset")]]}),
@@ -881,6 +885,7 @@ class BeamsWindow(ui.KzhWindow):
 
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, lambda: self.on_edit("section"))
         self.editor.build(SECTION_FIELDS)
+        self.editor.pinned = ["details", "model"]     # не прыгают при смене режима
         # Детали из конфигуратора: выбор в списке, щелчки по стержням рисунка
         self.picker = DetailPicker(self.window, self.editor, self.cnvSection, library(),
                                    lambda: self.current.opts.setdefault("details", []), self.refresh)
@@ -895,9 +900,12 @@ class BeamsWindow(ui.KzhWindow):
         self.cbStSteel.ItemsSource = steel()
         self.cbConcrete.ItemsSource = [Option(c, c) for c in norms.concrete_classes()]
         self.cbCover.ItemsSource = [Option(u"{} — {} мм".format(t, v), k) for k, t, v in norms.cover_conditions()]
-        hook_names = [element_name(h) for h in kr.hook_types(doc)]
-        self.cbHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
-        self.cbTieHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
+        # Хомут и шпилька — детали библиотеки «Детали» (крюки задаются в детали)
+        self.lib = library()
+        self.cbHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "stirrup")]
+        self.cbTieHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "pin")]
         self.cbTieEvery.ItemsSource = [Option(u"на каждом хомуте", 1), Option(u"через один хомут", 2)]
 
         saved = settings.load(SETTINGS_SECTION)
@@ -923,14 +931,14 @@ class BeamsWindow(ui.KzhWindow):
     def load_length(self, saved):
         o = dict(LENGTH_DEFAULTS)
         o.update(dict((k, v) for k, v in saved.items() if k in o))
-        default_hook = kr.default_stirrup_hook(doc)
-        default_hook = element_name(default_hook) if default_hook is not None else u""
+        # Пусто — без крюков; не деталь библиотеки (старые настройки — имя типа отгиба) — деталь по умолчанию
+        pick = lambda value, kind: value if value == u"" or kdet.find(self.lib, value) else kdet.default_name(self.lib, kind)
         ui.select_option(self.cbSteel, o["steel"])
         ui.select_option(self.cbStSteel, o["st_steel"])
         ui.select_option(self.cbConcrete, o["concrete"])
         ui.select_option(self.cbCover, o["cover_cond"])
-        ui.select_option(self.cbHook, default_hook if o["hook"] is None else o["hook"])
-        ui.select_option(self.cbTieHook, default_hook if o["tie_hook"] is None else o["tie_hook"])
+        ui.select_option(self.cbHook, pick(o["hook"], "stirrup"))
+        ui.select_option(self.cbTieHook, pick(o["tie_hook"], "pin"))
         ui.select_option(self.cbTieEvery, o["tie_every"])
         self.zeditor.load({"first_offset": o["first_offset"]})
         self.rbEndsAuto.IsChecked = o["ends"] != ENDS_FLUSH

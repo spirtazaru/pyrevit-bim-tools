@@ -61,6 +61,9 @@ class SectionEditor(object):
         self.notes = {}        # ключ карточки -> пояснение (скрывается, если колонка не помещается по высоте)
         self.buttons = {}      # ключ -> Button
         self.panels = {}       # ключ -> StackPanel, заполняемая окном
+        # Закреплённые карточки (по порядку): всегда вверху своей колонки, место не зависит от цели выноски
+        # и от смены режима — например, «Детали в сечении», с которой работают щелчками по рисунку
+        self.pinned = []
         self._leaders = []
         self._loading = False
 
@@ -165,20 +168,22 @@ class SectionEditor(object):
                 panel.Child = stack
                 title = self._label(parts["title"])
                 title.Margin = Thickness(0)
-                title.FontSize = 12.5
+                title.FontSize = 13.5           # заголовок карточки — заметно крупнее полей
                 title.FontWeight = System.Windows.FontWeights.Bold
+                title.Foreground = kd.brush("#FF1F1711")
                 stack.Children.Add(title)
                 self.titles[key] = title
                 if parts.get("note"):
                     note = self._label(parts["note"])
-                    note.Margin = Thickness(0, 1, 0, 0)
-                    note.FontSize = 10.5
+                    note.Margin = Thickness(0, 2, 0, 2)
+                    note.FontSize = 11.0
                     note.TextWrapping = TextWrapping.Wrap
                     note.MaxWidth = NOTE_W
                     note.HorizontalAlignment = HorizontalAlignment.Left
                     note.Foreground = kd.brush("#FF8C7A6B")
                     stack.Children.Add(note)
                     self.notes[key] = note
+                    title.ToolTip = parts["note"]      # пояснение доступно и когда оно скрыто из-за высоты
                 for parts_row in parts["rows"]:
                     self._row(parts_row, side, stack, True)
             else:
@@ -195,6 +200,7 @@ class SectionEditor(object):
     def set_note(self, key, text):
         if key in self.notes:
             self.notes[key].Text = text
+            self.titles[key].ToolTip = text
 
     def set_hint(self, key, text):
         if key in self.hints:
@@ -253,7 +259,7 @@ class SectionEditor(object):
         rows_b = self._rows("B")
         if rows_t:
             top = max(top, EDGE + sum(r[1] for r in rows_t) + GAP * (len(rows_t) - 1) + gap)
-        if len(rows_b) > 1:
+        if rows_b:
             bottom = max(bottom, EDGE + sum(r[1] for r in rows_b) + GAP * (len(rows_b) - 1) + gap)
         return (EDGE + widths["L"] + gap, top, EDGE + widths["R"] + gap, bottom)
 
@@ -293,16 +299,27 @@ class SectionEditor(object):
         if w < 60 or h < 60:
             return
         by_side = {"L": [], "R": [], "B": [], "T": []}
-        for key, pt in targets.items():
+        pins = {}                 # панель закреплённой карточки -> её номер в self.pinned
+        keys = list(targets.keys()) + [k for k in self.pinned if k not in targets]
+        for key in keys:
+            pt = targets.get(key)
             if key in self.groups:
                 side, panel = self.groups[key]
                 if panel.Visibility == Visibility.Visible:
                     _measure(panel)
+                    if key in self.pinned:
+                        pins[panel] = self.pinned.index(key)
                     if pt is None:
                         by_side[side].append(((w / 2.0, h / 2.0), panel, False))
                     else:
                         # (x, y) — выноска к точке; (x, y, False) — только место по высоте, без выноски
                         by_side[side].append(((pt[0], pt[1]), panel, len(pt) < 3 or pt[2]))
+        # Ряды сверху и снизу занимают свою полосу: колонки слева и справа в неё не заходят
+        band = {}
+        for side in ("T", "B"):
+            rows = self._rows(side, sorted(by_side[side], key=lambda it: it[0][0]))
+            band[side] = (sum(rh for _, rh in rows) + GAP * len(rows)) if rows else 0.0
+        y_top, y_bot = EDGE + band["T"], h - EDGE - band["B"]
         for side in ("L", "R"):
             # Колонка не помещается по высоте — пояснения карточек скрываются, остаются заголовки и поля
             keys = [k for k, (sd, pn) in self.groups.items() if sd == side and k in self.notes]
@@ -311,27 +328,29 @@ class SectionEditor(object):
             for _, panel, _ in by_side[side]:
                 _measure(panel)
             total = sum(it[1].DesiredSize.Height for it in by_side[side]) + GAP * max(len(by_side[side]) - 1, 0)
-            if total > h - 2 * EDGE:
+            if total > y_bot - y_top:
                 for k in keys:
                     self.notes[k].Visibility = Visibility.Collapsed
                 for _, panel, _ in by_side[side]:
                     _measure(panel)
             # По высоте цели; при равной высоте — слева по возрастанию x, справа по убыванию (выноски не перекрещиваются)
+            # Закреплённые карточки — первыми, в своём порядке, вплотную к верху колонки
             sign = 1.0 if side == "L" else -1.0
-            items = sorted(by_side[side], key=lambda it: (round(it[0][1], 1), sign * it[0][0]))
+            items = sorted(by_side[side], key=lambda it: (0, pins[it[1]], 0.0) if it[1] in pins
+                           else (1, round(it[0][1], 1), sign * it[0][0]))
             # Сверху вниз — без наложений; если низ не поместился — второй проход снизу вверх
-            ys, y_next = [], EDGE
+            ys, y_next = [], y_top
             for (tx, ty), panel, has_leader in items:
                 ph = panel.DesiredSize.Height
-                ys.append(max(ty - ph / 2.0, y_next))
+                ys.append(y_next if panel in pins else max(ty - ph / 2.0, y_next))
                 y_next = ys[-1] + ph + GAP
-            y_limit = h - EDGE
+            y_limit = y_bot
             for k in range(len(items) - 1, -1, -1):
                 ph = items[k][1].DesiredSize.Height
-                ys[k] = max(EDGE, min(ys[k], y_limit - ph))
+                ys[k] = max(y_top, min(ys[k], y_limit - ph))
                 y_limit = ys[k] - GAP
             # Третий проход сверху вниз: верхние поля, упёршиеся в край, не должны наезжать друг на друга
-            y_next = EDGE
+            y_next = y_top
             for k in range(len(items)):
                 ys[k] = max(ys[k], y_next)
                 y_next = ys[k] + items[k][1].DesiredSize.Height + GAP

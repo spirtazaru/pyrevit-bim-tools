@@ -14,12 +14,13 @@ clr.AddReference('PresentationCore')
 clr.AddReference('WindowsBase')
 
 import System
-from System.Diagnostics import Process
 from System.Windows import WindowState, Visibility
 from System.Windows.Controls import Button
 from System.Windows.Interop import WindowInteropHelper
 from System.Windows.Markup import XamlReader
 from System.Windows.Media import VisualTreeHelper
+
+import bimtools_window
 
 
 # ==========================================================
@@ -225,14 +226,34 @@ def _run_dialog(text, kind, title, details, ask, limit, input_default, details_h
     return result[0], tb_input.Text
 
 
-def revit_window_handle():
-    """Главное окно Revit — владелец окон кнопок. Process.MainWindowHandle может указать на только что
-    закрытое окно (ShowDialog: «Недопустимый дескриптор окна»), поэтому берём окно из UIApplication."""
+revit_window_handle = bimtools_window.revit_window_handle
+
+
+def pick_elements(uidoc, category_ids, prompt):
+    """Элементы нужных категорий из текущего выделения, иначе — выбор в модели (Esc — пустой список).
+    category_ids — целые id категорий (int(BuiltInCategory…)). Так ведут себя все кнопки КЖ."""
+    from Autodesk.Revit.Exceptions import OperationCanceledException
+    from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
+    cats = set(category_ids)
+
+    class _Filter(ISelectionFilter):
+        def AllowElement(self, element):
+            return element.Category is not None and element.Category.Id.IntegerValue in cats
+
+        def AllowReference(self, reference, point):
+            return False
+
+    doc = uidoc.Document
+    flt = _Filter()
+    picked = [doc.GetElement(i) for i in uidoc.Selection.GetElementIds()]
+    picked = [e for e in picked if e is not None and flt.AllowElement(e)]
+    if picked:
+        return picked
     try:
-        from pyrevit import HOST_APP
-        return HOST_APP.uiapp.MainWindowHandle
-    except Exception:
-        return Process.GetCurrentProcess().MainWindowHandle
+        refs = uidoc.Selection.PickObjects(ObjectType.Element, flt, prompt)
+    except OperationCanceledException:
+        return []
+    return [doc.GetElement(r.ElementId) for r in refs]
 
 
 def show_message(text, kind='warn', title=None, details=None, ask=False, limit=500, details_header=None):
@@ -371,6 +392,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.9"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.75"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF2B2118"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -392,6 +415,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFFFFF"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFEBD9"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FFFF7A1A"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -638,6 +663,21 @@ XAML_RESOURCES = u"""
             <Setter Property="TextWrapping" Value="Wrap"/>
             <Setter Property="Margin" Value="4,6,0,0"/>
         </Style>
+        <!-- Всплывающие подсказки: светлая карточка с оранжевой рамкой, перенос длинного текста -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#FFFFFBF7"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="BorderBrush" Value="#99FF7A1A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="MaxWidth" Value="420"/>
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 """
 
 # Верхняя панель с кнопками-«точками»: вставляется в XAML окна вместо __TITLEBAR__
@@ -755,12 +795,6 @@ class KzhWindow(object):
         self.window = XamlReader.Parse(xaml.replace('__RESOURCES__', XAML_RESOURCES)
                                        .replace('__TITLEBAR__', XAML_TITLEBAR))
         dialog_owner = self.window
-        # Окно не больше рабочей области экрана (ноутбуки)
-        area = System.Windows.SystemParameters.WorkArea
-        self.window.Width = min(self.window.Width, area.Width - 20)
-        self.window.Height = min(self.window.Height, area.Height - 20)
-        self.window.MinWidth = min(self.window.MinWidth, self.window.Width)
-        self.window.MinHeight = min(self.window.MinHeight, self.window.Height)
         for name in control_names:
             setattr(self, name, self.window.FindName(name))
         self.TitleBar = self.window.FindName('TitleBar')
@@ -771,6 +805,8 @@ class KzhWindow(object):
         self._nav = [(self.window.FindName(n), self.window.FindName(p)) for n, p in nav_pages]
         for nav, _ in self._nav:
             nav.Checked += self._on_nav
+        # По размеру экрана, прежние размер, положение и раздел, Esc — закрыть (общее для окон BIMTools)
+        bimtools_window.setup(self.window, nav=[nav for nav, _ in self._nav], esc_closes=True)
 
     def _on_drag(self, sender, args):
         try:

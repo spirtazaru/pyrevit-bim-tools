@@ -28,7 +28,9 @@ import traceback
 from pyrevit import DB
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from Autodesk.Revit.Exceptions import OperationCanceledException
-from System.Windows import Visibility
+from System.Windows import Visibility, Thickness
+from System.Windows.Controls import Button
+from System.Collections.Generic import List
 
 import sys
 # pyRevit держит модули lib в памяти движка между запусками кнопок: без сброса после обновления
@@ -43,7 +45,9 @@ from kzh import planar as kp
 from kzh import norms, settings
 from kzh import rebar as kr
 from kzh.geometry import mm
-from kzh.section_editor import SectionEditor
+from kzh.section_editor import SectionEditor, ZoneEditor
+from kzh import details as kdet
+from kzh import model_rebar
 from kzh.ui import show_message, Option
 
 uidoc = __revit__.ActiveUIDocument
@@ -64,11 +68,14 @@ GENERAL_DEFAULTS = {"steel": u"А500", "st_steel": u"А240", "concrete": u"В25"
 # x/y — направление стержней. c_b/c_t — защитный слой до ближайшего к грани стержня (None — по норме).
 # du — П-стержни (None — как сетка), d_add/n_add — доп. стержни у отверстий, df/sf — лягушки,
 # dr/pr/fr — стержни в гофрах профлиста: Ø, шаг гофр, первая гофра от края (None — по профилю)
+# zdir/zones — зоны в плане: направление деления и [{"len", "dt", "st", "db", "sb"}] (дополнительные стержни сверху
+# и снизу вдоль направления деления); u_det — деталь из библиотеки по краю плиты вместо расчётного П-стержня
 MESH_DEFAULTS = {"kind": None, "dbx": 12, "sbx": 200.0, "dby": 12, "sby": 200.0,
                  "dtx": 12, "stx": 200.0, "dty": 12, "sty": 200.0,
-                 "c_b": None, "c_t": None, "cond_b": "indoor_normal", "cond_t": "indoor_normal", "x_out": True,
+                 "c_b": None, "c_t": None, "cond_b": "indoor_normal", "cond_t": "indoor_normal", "x_out_b": True, "x_out_t": True,
                  "du": None, "d_add": None, "n_add": None, "small": None, "frogs": True, "df": None, "sf": None,
-                 "dr": 12, "pr": None, "fr": None}
+                 "dr": 12, "pr": None, "fr": None,
+                 "zdir": "x", "zones": [], "u_det": None, "frog_det": None}
 # Значения по умолчанию при переключении типа
 KIND_DEFAULTS = {
     "solid": {"dbx": 12, "dby": 12, "dtx": 12, "dty": 12, "sbx": 200.0, "sby": 200.0, "stx": 200.0, "sty": 200.0,
@@ -242,11 +249,23 @@ class Calc(object):
         self.c_b = so["c_b"] or self.c_auto_b
         self.c_t = so["c_t"] or self.c_auto_t
         self.du = so["du"] or max(so["dbx"], so["dby"])
+        # Деталь края плиты из библиотеки (П или Г) — вместо расчётного П-стержня
+        self.u_det = kdet.find(library(), so.get("u_det")) if so.get("u_det") else None
+        if self.u_det is not None:
+            self.du = self.u_det["d"]
         self.small = so["small"] if so["small"] is not None else norms.slab_rule("small_opening")["mm"]
         self.first = norms.slab_rule("first_bar")["mm"]
         fd = norms.slab_rule("frog_d")
         self.df = so["df"] or (fd["mm_thick"] if self.t > fd["h_mm"] else fd["mm"])
         self.sf = so["sf"] or norms.slab_rule("frog_step")["mm"]
+        # Лягушка из библиотеки «Детали»: Ø, класс, ширина верха B и лапки A; высота — по месту между сетками
+        self.frog_det = kdet.find(library(), so.get("frog_det")) if so.get("frog_det") else None
+        self.frog_w, self.frog_foot = FROG_W, FROG_FOOT
+        if self.frog_det is not None:
+            dims = self.frog_det["dims"]
+            self.df = self.frog_det["d"]
+            self.frog_w = dims.get("B") or FROG_W
+            self.frog_foot = dims.get("A") or FROG_FOOT
         self.deck_h = (deck or {}).get("h") or 0.0
         self.pr = so["pr"] or (deck or {}).get("pitch") or 200.0
         self.fr = so["fr"] if so["fr"] is not None else self.pr / 2.0
@@ -277,15 +296,19 @@ class Calc(object):
         for key in ("bx", "by"):
             if key in self.layers and self.mu(key) < mu_min:
                 w.append(u"{}: μ = {:.2f} % меньше {} %".format(LAYER_TITLES[key], float(self.mu(key)), mu_min))
+        if kind in ("solid", "foundation") and min(self.c_b, self.c_t) < norms.cover_main(so["cond_b"], self.du):
+            w.append(u"стержни края ⌀{}: защитный слой сеток {:.0f} мм меньше нормы для этого диаметра ({:.0f} мм) — "
+                     u"увеличьте слой или возьмите стержень тоньше".format(
+                         self.du, float(min(self.c_b, self.c_t)), float(norms.cover_main(so["cond_b"], self.du))))
         if kind == "deck" and self.deck_h and self.t - self.deck_h < 2 * self.c_t + 30:
             w.append(u"над гофрами мало места для сетки")
         if kind == "ribbed" and self.t > 160:
             w.append(u"полка толщиной {:.0f} мм — для толстой плиты подойдёт тип «Сплошная»".format(float(self.t)))
 
     def _two_layers(self, face_key, face, c, dx, sx, dy, sy):
-        """Два слоя сетки у грани: снаружи — X или Y (so["x_out"])."""
+        """Два слоя сетки у грани: снаружи — X или Y (so["x_out_b"] / so["x_out_t"] — у каждой грани свой порядок)."""
         L = kp.Layer
-        if self.so["x_out"]:
+        if self.so["x_out_" + face_key]:
             off_x, off_y = c + dx / 2.0, c + dx + dy / 2.0
         else:
             off_y, off_x = c + dy / 2.0, c + dy + dx / 2.0
@@ -313,10 +336,37 @@ class Calc(object):
 
 LAYER_TITLES = {"bx": u"низ X", "by": u"низ Y", "tx": u"верх X", "ty": u"верх Y", "rib": u"в гофрах"}
 
+_LIBRARY = []
+
+
+def library():
+    """Библиотека деталей (кнопка «Детали»): читается один раз за запуск."""
+    if not _LIBRARY:
+        _LIBRARY.append(kdet.load_library())
+    return _LIBRARY[0]
+
+
+def zone_spans(zones, a0, a1):
+    """Зоны в плане на отрезке [a0, a1] (мм): [(начало, конец, зона)]. Зона с пустой длиной занимает остаток;
+    зоны, не поместившиеся в плиту, отбрасываются; последняя продлевается до края."""
+    fixed = sum(z["len"] for z in zones if z.get("len"))
+    rest = max(0.0, (a1 - a0) - fixed)
+    out, s0 = [], a0
+    for z in zones:
+        length = min(z["len"] if z.get("len") else rest, a1 - s0)
+        if length <= 1.0:
+            continue
+        out.append((s0, s0 + length, z))
+        s0 += length
+    if out and s0 < a1 - 1.0:
+        out[-1] = (out[-1][0], a1, out[-1][2])
+    return out
+
 # Категории стержней: (ключ, роль, подпись в сводке)
 CATEGORIES = (
     ("bx", "straight", u"низ X"), ("by", "straight", u"низ Y"), ("tx", "straight", u"верх X"), ("ty", "straight", u"верх Y"),
-    ("rib", "straight", u"в гофрах"), ("add", "straight", u"доп. у отверстий"), ("u", "U", u"П-стержни"),
+    ("rib", "straight", u"в гофрах"), ("add", "straight", u"доп. у отверстий"),
+    ("zt", "straight", u"доп. верх по зонам"), ("zb", "straight", u"доп. низ по зонам"), ("u", "U", u"стержни края"),
     ("frog", "frog", u"лягушки"),
 )
 
@@ -361,7 +411,8 @@ def plan_slab(calc, item):
                 ps.append(lo + calc.fr + k * calc.pr)
                 k += 1
         else:
-            ps = kp.positions(lo, hi, calc.first, lay.step)
+            # Крайний стержень: боковой защитный слой не меньше его слоя по норме (СП 63, п. 10.3.2)
+            ps = kp.positions(lo, hi, max(calc.first, c + lay.d / 2.0), lay.step)
             ps = kp.shifted_positions(ps, small, lay.along, c + lay.d / 2.0)
         rule = lambda side, pos, s, c=c: (-c, [])
         bars, drawn = kp.layer_bars(p, lay, ps, big, c, rule, clear)
@@ -373,6 +424,7 @@ def plan_slab(calc, item):
         if key != "rib":
             _opening_bars(calc, item, plan, big, lay, ps, clear)
     if two:
+        _zone_bars(calc, item, plan, big, u_open)
         _ubars(calc, item, plan, big, ho["u_edges"], u_open)
         if so["frogs"]:
             _frogs(calc, item, plan, big)
@@ -382,6 +434,47 @@ def plan_slab(calc, item):
     if calc.kind == "deck" and not item.deck:
         plan.notes.append(u"в типе плиты нет профлиста — шаг гофр задайте вручную")
     return plan, None
+
+
+def _zone_bars(calc, item, plan, big, u_open):
+    """Дополнительные стержни по зонам плана: вдоль направления деления, между стержнями основной сетки того же
+    слоя, с заведением за границы зоны на длину анкеровки (СП 63, п. 10.3.24). У края плиты — до защитного слоя."""
+    so, ho, p = calc.so, calc.ho, item.plate
+    zones = so.get("zones") or []
+    along = so.get("zdir") or "x"
+    a0, a1 = (p.x0, p.x1) if along == "x" else (p.y0, p.y1)
+    lo, hi = (p.y0, p.y1) if along == "x" else (p.x0, p.x1)
+    plan.zone_dir = along
+    plan.zone_spans = zone_spans(zones, a0, a1)
+    for s0, s1, z in plan.zone_spans:
+        for face, dk, sk_, cat in (("t", "dt", "st", "zt"), ("b", "db", "sb", "zb")):
+            d, step = z.get(dk), z.get(sk_)
+            if not d or not step:
+                continue
+            base = calc.layers[face + along]
+            c = calc.cover_of(base)
+            ps_main = plan.ps.get(base.key, [])
+            if len(ps_main) >= 2:
+                pitch = (ps_main[-1] - ps_main[0]) / (len(ps_main) - 1)
+                stride = max(1, int(round(step / pitch)))
+                ps = [(ps_main[i] + ps_main[i + 1]) / 2.0 for i in range(0, len(ps_main) - 1, stride)]
+            else:
+                ps = kp.positions(lo, hi, max(calc.first, c + d / 2.0), step)
+            # Поверхность у грани плиты — в одном уровне с основной сеткой: защитный слой тот же
+            layer = kp.Layer(cat, along, base.face, base.off - base.d / 2.0 + d / 2.0, d, step)
+            outer = (along == "x") == bool(so["x_out_" + face])
+            if d > base.d and outer:
+                plan.notes.append(u"доп. стержни ⌀{} толще сетки ⌀{} наружного слоя — пересекутся с поперечными "
+                                  u"стержнями: возьмите Ø не больше сетки или смените порядок слоёв".format(d, base.d))
+            lan = calc.anchorage(d)
+            clear = c + (calc.du if u_open else 0.0) + d / 2.0
+            rule = lambda side, pos, s, c=c: (-c, [])
+            bars, _ = kp.layer_bars(p, layer, ps, big, c, rule, clear, (s0 - lan, s1 + lan))
+            shift = (0.0, d, 0.0) if along == "x" else (d, 0.0, 0.0)
+            bars = kp.split_long(bars, ho["max_len"], calc.lap(d), 0 if along == "x" else 1, shift)
+            for bar in bars:
+                bar.d = d
+            plan.add(cat, bars)
 
 
 def _opening_bars(calc, item, plan, big, lay, ps, clear):
@@ -426,8 +519,17 @@ def _ubars(calc, item, plan, big, u_edges, u_open):
         ex, ey = ex / length, ey / length
         legs_x = abs(inward[0]) >= abs(inward[1])
         lb, lt = (calc.layers["bx"], calc.layers["tx"]) if legs_x else (calc.layers["by"], calc.layers["ty"])
-        c = max(calc.c_b, calc.c_t)
+        # Торец стержня края — с защитным слоем не меньше нормы для его диаметра (СП 63, п. 10.3.2)
+        c = max(calc.c_b, calc.c_t, norms.cover_main(calc.so["cond_b"], du))
         leg = norms.ceil_to(norms.slab_rule("ubar_leg")["k_lan"] * calc.anchorage(max(lb.d, lt.d)))
+        det = calc.u_det
+        leg_t = leg_b = leg
+        if det is not None:
+            dims = det["dims"]
+            if det["kind"] == "U":
+                leg_t, leg_b = float(dims.get("B") or leg), float(dims.get("C") or leg)
+            else:                       # Г: полка в уровне верхней сетки, ножка вниз
+                leg_t, leg_b = float(dims.get("A") or leg), 0.0
         # Позиции вдоль кромки: рядом со стержнями слоя, если кромка вдоль оси, иначе — равномерно
         out = []
         if abs(ex) < 1e-3 or abs(ey) < 1e-3:
@@ -448,12 +550,19 @@ def _ubars(calc, item, plan, big, u_edges, u_open):
             segs = p.chord((wx, wy, n_mid), (wx + inward[0] * (leg + 1000), wy + inward[1] * (leg + 1000), n_mid))
             room = segs[0][1] if segs else None
             avail = math.hypot(room[0] - wx, room[1] - wy) - c if room else 0.0
-            L = min(leg, avail)
-            if L < 100:
+            Lt, Lb = min(leg_t, avail), min(leg_b, avail)
+            if Lt < 100:
                 continue
-            fx, fy = wx + inward[0] * L, wy + inward[1] * L
             nb, nt = lb.n(p, 0.0), lt.n(p, 0.0)
-            out.append(kp.Bar([(fx, fy, nb), (wx, wy, nb), (wx, wy, nt), (fx, fy, nt)], len(out)))
+            # Ножки — рядом со стержнями сеток того же направления, вплотную к поперечному слою
+            nb += (du - lb.d) / 2.0
+            nt -= (du - lt.d) / 2.0
+            top = (wx + inward[0] * Lt, wy + inward[1] * Lt, nt)
+            if det is not None and det["kind"] == "L":
+                drop = min(float(det["dims"].get("B") or (nt - nb)), nt - nb)
+                out.append(kp.Bar([top, (wx, wy, nt), (wx, wy, nt - drop)], len(out)))
+            elif Lb >= 100:
+                out.append(kp.Bar([(wx + inward[0] * Lb, wy + inward[1] * Lb, nb), (wx, wy, nb), (wx, wy, nt), top], len(out)))
         return out
 
     if u_edges:
@@ -482,8 +591,8 @@ def _frogs(calc, item, plan, big):
     """Лягушки под верхнюю сетку по сетке с шагом sf. Ставится одна, число — в АрмЧисло."""
     p = item.plate
     df = calc.df
-    lb_in = calc.layers["by"] if calc.so["x_out"] else calc.layers["bx"]
-    lt_in = calc.layers["ty"] if calc.so["x_out"] else calc.layers["tx"]
+    lb_in = calc.layers["by"] if calc.so["x_out_b"] else calc.layers["bx"]
+    lt_in = calc.layers["ty"] if calc.so["x_out_t"] else calc.layers["tx"]
     nb = lb_in.n(p, 0.0) + lb_in.d / 2.0 + df / 2.0
     nt = lt_in.n(p, 0.0) - lt_in.d / 2.0 - df / 2.0
     if nt - nb < 40:
@@ -498,7 +607,8 @@ def _frogs(calc, item, plan, big):
         for y in ys:
             if any(o.x0 - 150 < x < o.x1 + 150 and o.y0 - 150 < y < o.y1 + 150 for o in big):
                 continue
-            ok = all(p.depth_at(x + dx, y) is not None for dx in (-FROG_W / 2.0 - FROG_FOOT, FROG_W / 2.0 + FROG_FOOT))
+            ok = all(p.depth_at(x + dx, y) is not None for dx in (-calc.frog_w / 2.0 - calc.frog_foot,
+                                                                   calc.frog_w / 2.0 + calc.frog_foot))
             if ok:
                 valid.append((x, y))
     if not valid:
@@ -507,7 +617,7 @@ def _frogs(calc, item, plan, big):
     if ps_bx:
         # Рядом со стержнем нижнего слоя X, не в одной плоскости с ним
         y = min(ps_bx, key=lambda q: abs(q - y)) + (calc.layers["bx"].d + df) / 2.0
-    w, a = FROG_W / 2.0, FROG_FOOT
+    w, a = calc.frog_w / 2.0, calc.frog_foot
     bar = kp.Bar([(x - w - a, y, nb), (x - w, y, nb), (x - w, y, nt), (x + w, y, nt), (x + w, y, nb), (x + w + a, y, nb)], 0)
     bar.arm_count = len(valid)
     plan.add("frog", [bar])
@@ -524,15 +634,22 @@ def plan_specs(item, plan, calc):
         if not bars:
             continue
         if key == "u":
+            det = calc.u_det
+            role = "L" if (det is not None and det["kind"] == "L") else "U"
             for g in plan.u_groups:
                 if g:
-                    specs.extend(kp.bars_to_specs(p, "U", calc.du, g))
+                    for sp in kp.bars_to_specs(p, role, calc.du, g):
+                        if det is not None:
+                            sp.steel = det.get("steel")
+                        specs.append(sp)
         elif key == "frog":
             for bar in bars:
                 sp = kp.bars_to_specs(p, "frog", calc.df, [bar])[0]
                 sp.arm_count = bar.arm_count
+                if calc.frog_det is not None:
+                    sp.steel = calc.frog_det.get("steel")
                 specs.append(sp)
-        elif key == "add":
+        elif key in ("add", "zt", "zb"):
             by_d = {}
             for b in bars:
                 by_d.setdefault(b.d, []).append(b)
@@ -599,8 +716,29 @@ def draw_plan(canvas, calc, item, plan, pad):
         sk.poly([(q[0], q[1]) for q in bar.pts], kd.STIRRUP, 1.2, dash=True)
     for bar in plan.bars.get("add", []):
         sk.poly([(q[0], q[1]) for q in bar.pts], kd.CORNER, 2.0)
+    for bar in plan.bars.get("zt", []):
+        sk.poly([(q[0], q[1]) for q in bar.pts], kd.CORNER, 2.0)
+    for bar in plan.bars.get("zb", []):
+        sk.poly([(q[0], q[1]) for q in bar.pts], kd.CORNER, 2.0, dash=True)
     for bar in plan.bars.get("u", []):
         sk.line(bar.pts[0][0], bar.pts[0][1], bar.pts[1][0], bar.pts[1][1], kd.STIRRUP, 1.6)
+    # Зоны в плане: границы — штрихпунктиром, размерная цепочка вдоль направления деления
+    spans = getattr(plan, "zone_spans", [])
+    zx = getattr(plan, "zone_dir", "x") == "x"
+    ztargets = {}
+    for i, (s0, s1, z) in enumerate(spans):
+        if zx:
+            if i:
+                sk.line(s0, p.y0 - 80, s0, p.y1 + 80, kd.DIM, 0.8, dash=True)
+            sk.dim_line(s0, p.y0 - 220, s1, p.y0 - 220)
+            sk.text((s0 + s1) / 2.0, p.y0 - 150, u"зона {} • {:.0f}".format(i + 1, float(s1 - s0)), size=10.5)
+            ztargets[u"zone_{}".format(i)] = (float(i), 0.0, False)
+        else:
+            if i:
+                sk.line(p.x0 - 80, s0, p.x1 + 80, s0, kd.DIM, 0.8, dash=True)
+            sk.dim_line(p.x1 + 220, s0, p.x1 + 220, s1)
+            sk.text(p.x1 + 150, (s0 + s1) / 2.0, u"зона {} • {:.0f}".format(i + 1, float(s1 - s0)), size=10.5, vertical=True)
+            ztargets[u"zone_{}".format(i)] = (float(i), 0.0, False)
     for x, y in getattr(plan, "frog_grid", [])[:2000]:
         sk.rect(x - 60, y - 60, x + 60, y + 60, kd.WARN, 1.0)
     sk.dim(p.x0, p.y1, p.x1, p.y1, u"{:.0f}".format(float(p.x1 - p.x0)), offset_px=12)
@@ -625,6 +763,11 @@ def draw_plan(canvas, calc, item, plan, pad):
     targets["small"] = (sk.X(p.x1), sk.Y(p.y0), False)
     grid = getattr(plan, "frog_grid", [])
     targets["frog"] = P(grid[0][0], grid[0][1]) if grid else None
+    targets.update(ztargets)
+    targets["zone_add"] = (1e6, 0.0, False)
+    targets["zones"] = (sk.X(p.x0), sk.Y(p.y1), False)
+    u = plan.bars.get("u", [])
+    targets["edge"] = P(u[0].pts[1][0], u[0].pts[1][1]) if u else (sk.X(p.x0), sk.Y(p.y0), False)
     return targets
 
 
@@ -691,7 +834,7 @@ def draw_section(canvas, calc, item, plan, pad):
         f = frog[0]
         base = y0 + win * 0.55
         sk.poly([(base + (q[0] - f.pts[0][0]), q[2]) for q in f.pts], kd.WARN, 1.5, dash=True)
-        targets["frog"] = P(base + FROG_FOOT + FROG_W / 2.0, f.pts[2][2])
+        targets["frog"] = P(base + calc.frog_foot + calc.frog_w / 2.0, f.pts[2][2])
     sk.dim(y0, n_lo, y0, n_hi, u"t = {:.0f}".format(float(n_hi - n_lo)))
     yc = y0 + win * 0.35
     if calc.kind in ("solid", "foundation"):
@@ -758,9 +901,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • ПЛИТЫ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navSection" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
-                                <RadioButton Name="navLength" GroupName="nav" Style="{StaticResource NavItem}" Content="План"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navSection" ToolTip="Разрез плиты: сетки, порядок слоёв, П-стержни, лягушки, профлист" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
+                                <RadioButton Name="navLength" ToolTip="План плиты: отверстия и их усиление, зоны дополнительного армирования, край" GroupName="nav" Style="{StaticResource NavItem}" Content="План"/>
+                                <RadioButton Name="navParams" ToolTip="Материалы, длина стержней и стыки, П-стержни по контуру" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -794,10 +937,10 @@ __TITLEBAR__
                                 </Grid>
                                 <WrapPanel Margin="0,10,0,0">
                                     <TextBlock Text="Тип плиты:" Style="{StaticResource Inline}" Margin="0,0,10,0"/>
-                                    <RadioButton Name="rbSolid" GroupName="kind" Style="{StaticResource ModePill}" Content="Сплошная"/>
-                                    <RadioButton Name="rbFoundation" GroupName="kind" Style="{StaticResource ModePill}" Content="Фундаментная"/>
-                                    <RadioButton Name="rbDeck" GroupName="kind" Style="{StaticResource ModePill}" Content="По профлисту"/>
-                                    <RadioButton Name="rbRibbed" GroupName="kind" Style="{StaticResource ModePill}" Content="Ребристая"/>
+                                    <RadioButton Name="rbSolid" ToolTip="Сплошная плита: нижняя и верхняя сетки" GroupName="kind" Style="{StaticResource ModePill}" Content="Сплошная"/>
+                                    <RadioButton Name="rbFoundation" ToolTip="Фундаментная плита: две сетки, защитный слой для грунта" GroupName="kind" Style="{StaticResource ModePill}" Content="Фундаментная"/>
+                                    <RadioButton Name="rbDeck" ToolTip="Плита по профлисту: верхняя сетка и стержни в гофрах" GroupName="kind" Style="{StaticResource ModePill}" Content="По профлисту"/>
+                                    <RadioButton Name="rbRibbed" ToolTip="Ребристая плита: одна сетка в полке" GroupName="kind" Style="{StaticResource ModePill}" Content="Ребристая"/>
                                 </WrapPanel>
                             </StackPanel>
                         </Border>
@@ -880,7 +1023,7 @@ __TITLEBAR__
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Name="tbInfo" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
-                            <Button Name="btnRun" Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnRun" ToolTip="Создать арматуру по настройкам окна. Сначала — список элементов и подтверждение; старая арматура удаляется только после отдельного подтверждения." Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>
@@ -924,8 +1067,10 @@ SECTION_FIELDS = [
     ("mesh", "L", _mesh_card(u"Сетка полки", u"Одна сетка по середине толщины полки ребристой плиты.",
                              "dmx", "smx", "dmy", "smy", None, "mesh")),
     ("order", "R", {"title": u"Порядок слоёв",
-                    "note": u"Какие стержни ближе к граням плиты: у нижней сетки — самые нижние, у верхней — самые верхние.",
-                    "rows": [[("combo", "x_out", [Option(u"снаружи стержни X", True), Option(u"снаружи стержни Y", False)], 210)]]}),
+                    "note": u"Какие стержни ближе к грани плиты — у каждой сетки свой выбор "
+                            u"(например, внизу снаружи X, вверху снаружи Y).",
+                    "rows": [[u"Нижняя сетка", ("combo", "x_out_b", [Option(u"снаружи X", True), Option(u"снаружи Y", False)], 130)],
+                             [u"Верхняя сетка", ("combo", "x_out_t", [Option(u"снаружи X", True), Option(u"снаружи Y", False)], 130)]]}),
     ("ubar", "R", {"title": u"П-стержни по контуру",
                    "note": u"Охватывают нижнюю и верхнюю сетки по краю плиты и по краям отверстий "
                            u"(включаются в «Параметрах»). Ножки — на длину анкеровки.",
@@ -933,11 +1078,13 @@ SECTION_FIELDS = [
     ("frog", "R", {"title": u"Поддерживающие каркасы (лягушки)",
                    "note": u"Держат верхнюю сетку над нижней. Ставится один элемент, общее число — в параметре «АрмЧисло».",
                    "rows": [[("combo", "frogs", [Option(u"ставить", True), Option(u"не ставить", False)], 140)],
+                            [u"Деталь", ("combo", "frog_det", [Option(u"по расчёту", None)], 190)],
                             [u"Ø", ("diam", "df"), u"шаг", ("num", "sf", 50), u"мм"], [("hint", "sf")]]}),
     ("deck", "R", {"title": u"Стержни в гофрах профлиста",
                    "note": u"По одному стержню в каждой гофре вдоль пролёта. Шаг гофр берётся из профиля в типе плиты.",
                    "rows": [[u"Ø", ("diam", "dr")], [u"Шаг гофр", ("num", "pr", 50), u"мм"],
                             [u"Первая гофра от края", ("num", "fr", 50), u"мм"], [("hint", "pr")]]}),
+    model_rebar.PLANAR_CARD,
 ]
 # Строка «Сетка» ребристой плиты редактирует те же значения, что и «Низ»: свои ключи полей -> ключи параметров
 MESH_ROW = (("dmx", "dbx"), ("smx", "sbx"), ("dmy", "dby"), ("smy", "sby"))
@@ -948,15 +1095,100 @@ PLAN_FIELDS = [
                   "rows": [[u"Ø", ("diam", "d_add"), u"по", ("num", "n_add", 34), u"шт. с каждой стороны"], [("hint", "n_add")],
                            [u"Малые отверстия — до", ("num", "small", 46), u"мм"], [("hint", "small")]]}),
 ]
+PLAN_FIELDS += [
+    ("zones", "L", {"title": u"Зоны в плане",
+                    "note": u"План делится на зоны вдоль оси (надопорные, пролётные). В зоне — дополнительные стержни "
+                            u"вдоль этой оси сверху и снизу, с заведением за границы зоны на длину анкеровки. "
+                            u"Строки зон — под планом; пустая длина — остаток.",
+                    "rows": [[u"Делить вдоль оси", ("combo", "zdir", [Option(u"X", "x"), Option(u"Y", "y")], 80)],
+                             [("hint", "zones")]]}),
+    ("edge", "L", {"title": u"Стержни по краю плиты",
+                   "note": u"По расчёту — П-стержни с ножками на длину анкеровки, или деталь из «Деталей»: П — ножки "
+                           u"B (верх) и C (низ); Г — полка A в верхней сетке, ножка B вниз.",
+                   "rows": [[("combo", "u_det", [Option(u"по расчёту (П)", None)], 230)], [("hint", "u_det")]]}),
+]
 DIAM_DEFAULT_KEYS = ("du", "d_add", "df")       # пустой выбор Ø — «как сетка» / по норме
+
+
+class PlanZones(ZoneEditor):
+    """Зоны плана: строка на зону — длина, дополнительные стержни сверху и снизу (Ø и шаг), удалить."""
+    FIELDS = (("len", "num"), ("dt", "diam"), ("st", "num"), ("db", "diam"), ("sb", "num"))
+
+    def __init__(self, owner, cnv_draw, cnv_fields, on_change):
+        ZoneEditor.__init__(self, owner, cnv_draw, cnv_fields, on_change)
+        self.groups["zone_add"] = ("B", self.btn_add)      # строки зон — под планом, слева направо
+
+    def set_zones(self, zones):
+        for key in [k for k in self.groups if k.startswith("zone_") and k != "zone_add"]:
+            self.cnv_fields.Children.Remove(self.groups.pop(key)[1])
+        for key in [k for k in self.inputs if k.startswith("z_")]:
+            del self.inputs[key]
+        self.zones = [dict(z) for z in zones]
+        groups = []
+        for i in range(len(self.zones)):
+            f = lambda name, i=i: u"z_{}_{}".format(name, i)
+            groups.append((u"zone_{}".format(i), "B", [
+                u"Зона {}".format(i + 1), ("num", f("len"), 54), u"мм  верх Ø", ("diam", f("dt")), u"шаг", ("num", f("st"), 42),
+                u"низ Ø", ("diam", f("db")), u"шаг", ("num", f("sb"), 42), ("hint", u"z_{}".format(i))]))
+        self.build(groups)
+        values = {}
+        for i, z in enumerate(self.zones):
+            for name, kind in self.FIELDS:
+                key = u"z_{}_{}".format(name, i)
+                if kind == "diam":
+                    cb = self.inputs[key][1]
+                    cb.ItemsSource = [Option(u"нет", None)] + list(cb.ItemsSource)
+                    cb.Width = 88.0
+                values[key] = z.get(name)
+            btn = Button()
+            btn.Style = self._style('GlassButton')
+            btn.Content = u"✕"
+            btn.Width = btn.Height = 30.0
+            btn.Padding = Thickness(0)
+            btn.ToolTip = u"Удалить зону"
+            btn.Click += lambda s, e, i=i: self._on_remove(i)
+            self.groups[u"zone_{}".format(i)][1].Children[0].Children.Add(btn)
+        self.load(values)
+
+    def read_zones(self):
+        values, keys = {}, []
+        for i in range(len(self.zones)):
+            keys += [u"z_{}_{}".format(name, i) for name, _ in self.FIELDS]
+        self.read(values, keys)
+        fill = 0
+        for i, z in enumerate(self.zones):
+            for name, _ in self.FIELDS:
+                z[name] = values[u"z_{}_{}".format(name, i)]
+            if z["len"] is None:
+                fill += 1
+            elif z["len"] <= 0:
+                return u"Зона {}: длина должна быть больше нуля (или пусто — остаток).".format(i + 1)
+            for dk, sk_ in (("dt", "st"), ("db", "sb")):
+                if z[dk] and (not z[sk_] or z[sk_] < 50):
+                    return u"Зона {}: шаг дополнительных стержней — не меньше 50 мм.".format(i + 1)
+        if fill > 1:
+            return u"Пустая длина (остаток) может быть только у одной зоны."
+        return None
+
+    def _on_add(self):
+        self.read_zones()
+        self.zones.append({"len": 1500.0 if self.zones else None, "dt": None, "st": 200.0, "db": None, "sb": 200.0})
+        self.set_zones(self.zones)
+        self.on_change()
+
+    def _on_remove(self, index):
+        self.read_zones()
+        del self.zones[index]
+        self.set_zones(self.zones)
+        self.on_change()
 
 
 def visible_section(kind):
     if kind in ("solid", "foundation"):
-        return ["top", "bot", "ubar", "frog", "order"]
+        return ["top", "bot", "ubar", "frog", "order", "model"]
     if kind == "deck":
-        return ["top", "deck", "order"]
-    return ["mesh"]
+        return ["top", "deck", "order", "model"]
+    return ["mesh", "model"]
 
 
 class SlabsWindow(ui.KzhWindow):
@@ -977,8 +1209,16 @@ class SlabsWindow(ui.KzhWindow):
 
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, self.refresh)
         self.editor.build(SECTION_FIELDS)
-        self.peditor = SectionEditor(self.window, self.cnvElev, self.cnvElevFields, self.refresh)
+        self.editor.pinned = ["model"]
+        self.model_ids, self.model_item = [], None
+        self.editor.buttons["mdl_show"].Click += self.on_model_show
+        self.editor.buttons["mdl_select"].Click += self.on_model_select
+        self.peditor = PlanZones(self.window, self.cnvElev, self.cnvElevFields, self.refresh)
         self.peditor.build(PLAN_FIELDS)
+        self.peditor.inputs["u_det"][1].ItemsSource = [Option(u"по расчёту (П)", None)] + [
+            Option(kdet.title(d), d["name"]) for d in library() if d["kind"] in ("U", "L")]
+        self.editor.inputs["frog_det"][1].ItemsSource = [Option(u"по расчёту", None)] + [
+            Option(kdet.title(d), d["name"]) for d in kdet.of_kind(library(), "frog")]
         for ed in (self.editor, self.peditor):
             for key in DIAM_DEFAULT_KEYS:
                 if key in ed.inputs:
@@ -1049,7 +1289,10 @@ class SlabsWindow(ui.KzhWindow):
         """Параметры группы для типа плиты: по умолчанию, затем сохранённые для этого типа."""
         o = dict(MESH_DEFAULTS)
         o.update(KIND_DEFAULTS[kind])
-        o.update(dict((k, v) for k, v in (self.saved.get("mesh_" + kind) or {}).items() if k in o))
+        saved = self.saved.get("mesh_" + kind) or {}
+        o.update(dict((k, v) for k, v in saved.items() if k in o))
+        if "x_out" in saved and "x_out_b" not in saved:      # старые настройки: один порядок на обе сетки
+            o["x_out_b"] = o["x_out_t"] = bool(saved["x_out"])
         o["kind"] = kind
         return o
 
@@ -1060,7 +1303,9 @@ class SlabsWindow(ui.KzhWindow):
             for name, k in KIND_BUTTONS:
                 getattr(self, name).IsChecked = (k == kind)
             self.editor.show_only(visible_section(kind))
-            self.peditor.show_only(["add"])
+            two = kind in ("solid", "foundation")
+            self.peditor.set_zones(g.opts.get("zones") or [] if two else [])
+            self.peditor.show_only(["add"] + ([k for k in self.peditor.groups if k.startswith("zone")] + ["edge"] if two else []))
             values = dict(g.opts)
             for field, key in MESH_ROW:
                 values[field] = g.opts[key]
@@ -1075,7 +1320,11 @@ class SlabsWindow(ui.KzhWindow):
         o = g.opts
         values = {}
         self.editor.read(values, [k for k in self.editor.inputs])
-        self.peditor.read(values, [k for k in self.peditor.inputs])
+        self.peditor.read(values, [k for k in self.peditor.inputs if not k.startswith("z_")])
+        err = self.peditor.read_zones()
+        if err:
+            return err
+        values["zones"] = [dict(z) for z in self.peditor.zones]
         for field, key in MESH_ROW:
             if o["kind"] == "ribbed":
                 values[key] = values[field]
@@ -1112,6 +1361,29 @@ class SlabsWindow(ui.KzhWindow):
         self.load_opts(g)
         self.refresh()
 
+    # ----------------------------------------------------------
+    # СВЕРКА С МОДЕЛЬЮ
+    # ----------------------------------------------------------
+    def on_model_show(self, sender, args):
+        """Сводка арматуры, которая уже стоит у выбранного элемента (только просмотр)."""
+        g = self.current
+        if g is None:
+            return
+        item = self.cbItem.SelectedItem or g.items[0]
+        lines, self.model_ids = model_rebar.layers(doc, item.floor, True)
+        self.model_item = item
+        self.editor.set_hint("mdl", u"{}:\n{}".format(item.title, u"\n".join(lines)) if lines
+                             else u"{}: в модели арматуры нет".format(item.title))
+        self.refresh()
+
+    def on_model_select(self, sender, args):
+        if not getattr(self, "model_ids", None):
+            show_message(u"Сначала нажмите «Показать арматуру модели».")
+            return
+        uidoc.Selection.SetElementIds(List[DB.ElementId](self.model_ids))
+        show_message(u"Выделено наборов арматуры: {}. Выделение будет видно в модели после закрытия окна.".format(
+            len(self.model_ids)))
+
     def refresh(self):
         g = self.current
         if self._loading or g is None:
@@ -1136,15 +1408,36 @@ class SlabsWindow(ui.KzhWindow):
             self.editor.set_hint("mesh", u"одна сетка по середине полки; шаг ≤ {:.0f} мм".format(float(s_max)))
             self.editor.set_hint("top", u"шаг по СП 63 — не более {:.0f} мм".format(float(s_max)))
             self.editor.set_hint("du", u"шаг — как у сетки")
-            self.editor.set_hint("sf", u"{} шт. → АрмЧисло; пусто — шаг {:.0f}, Ø {}".format(
-                plan.frogs, float(calc.sf), calc.df) if so["frogs"] else u"")
+            self.editor.set_hint("sf", (u"{} шт. → АрмЧисло; пусто — шаг {:.0f}, Ø {}".format(
+                plan.frogs, float(calc.sf), calc.df) + (u" • деталь «{}»: Ø и размеры A, B — из «Деталей», высота — "
+                                                        u"по месту".format(calc.frog_det["name"]) if calc.frog_det else u""))
+                                 if so["frogs"] else u"")
             deck = item.deck or {}
             self.editor.set_hint("pr", u"профиль «{}»: высота {:.0f}, шаг {:.0f}".format(
                 deck.get("name", u"—"), float(deck.get("h") or 0), float(deck.get("pitch") or 0)) if deck else
                 u"в типе плиты нет профлиста — задайте шаг")
             self.peditor.set_hint("n_add", u"" if so["n_add"] else u"пусто — по норме (≥ половины прерванных, ≥ 2)")
             self.peditor.set_hint("small", u"" if so["small"] is not None else u"пусто — {:.0f} (практика)".format(float(calc.small)))
+            spans = getattr(plan, "zone_spans", [])
+            self.peditor.set_hint("zones", u"зон: {}".format(len(spans)) if spans else u"зон нет — только основные сетки")
+            for i, z in enumerate(self.peditor.zones):
+                sp = next((x for x in spans if x[2] is so["zones"][i]), None) if i < len(so["zones"]) else None
+                parts = []
+                if sp is not None:
+                    parts.append(u"{:.0f} мм".format(float(sp[1] - sp[0])))
+                    for dk, title in (("dt", u"верх"), ("db", u"низ")):
+                        if z.get(dk):
+                            parts.append(u"{} ⌀{}: заведение {:.0f}".format(title, z[dk], float(calc.anchorage(z[dk]))))
+                self.peditor.set_hint(u"z_{}".format(i), u", ".join(parts) if sp is not None else u"не помещается в плиту")
+            det = calc.u_det
+            self.peditor.set_hint("u_det", u"⌀{} {} • шаг — как у сетки".format(det["d"], det.get("steel") or u"") if det is not None
+                                  else u"⌀{} • ножки {:.0f} мм • шаг — как у сетки".format(
+                                      calc.du, float(norms.ceil_to(calc.anchorage(max(so["dbx"], so["dtx"]))))))
             targets = draw_section(self.cnvSection, calc, item, plan, self.editor.pad(top=40, bottom=60))
+            if self.model_item is not item:          # сводка — только для того элемента, по которому её строили
+                self.editor.set_hint("mdl", u"")
+                self.model_ids, self.model_item = [], None
+            targets["model"] = model_rebar.TARGET
             self.editor.place(targets)
             ptargets = draw_plan(self.cnvElev, calc, item, plan, self.peditor.pad(top=30, bottom=30))
             self.peditor.place(ptargets)
@@ -1158,8 +1451,9 @@ class SlabsWindow(ui.KzhWindow):
         if notes:
             info += u" • Внимание: " + u"; ".join(notes)
         self.tbSectionInfo.Text = info
-        self.tbElevInfo.Text = (u"План: {} (линии), дополнительные стержни у отверстий (зелёные), П-стержни (синие), "
-                                u"лягушки (квадраты), рёбра — пунктиром. Отверстий: {}. Ось X — вдоль самой длинной кромки{}.".format(
+        self.tbElevInfo.Text = (u"План: {} (тонкие линии), дополнительные стержни у отверстий и по зонам (толстые; нижние — "
+                                u"штриховые), стержни края, лягушки (квадраты), рёбра — пунктиром. Отверстий: {}. "
+                                u"Ось X — вдоль самой длинной кромки{}.".format(
                                     u"нижняя сетка" if calc.kind != "deck" else u"верхняя сетка", len(item.openings),
                                     u" (у профлиста — вдоль пролёта)" if calc.kind == "deck" else u""))
         self.tbInfo.Text = calc.info_text()

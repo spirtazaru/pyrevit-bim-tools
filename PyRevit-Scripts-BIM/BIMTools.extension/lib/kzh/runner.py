@@ -9,15 +9,17 @@ import math
 from System.Collections.Generic import List
 from pyrevit import DB
 
-from kzh import element_name, params, service
+from kzh import params, service
+from kzh import details as kdet
 from kzh import rebar as kr
 from kzh.ui import show_message
 
 
-def find_hook(doc, name):
-    if not name:
-        return None
-    return next((h for h in kr.hook_types(doc) if element_name(h) == name), None)
+def hooks_from_details(doc, library, stirrup_name, pin_name):
+    """Отгибы хомутов и шпилек по деталям библиотеки «Детали» (угол крюка задаётся в детали):
+    {"stirrup": RebarHookType или None, "pin": ...}. Тип отгиба с таким углом должен быть в проекте."""
+    return dict((role, kr.hook_by_angle(doc, kdet.hook_angle(library, name), kr.STYLE_STIRRUP))
+                for role, name in (("stirrup", stirrup_name), ("pin", pin_name)))
 
 
 def run(doc, plans, skipped, warnings, steel_long, steel_trans, hooks, part_name, what, existing=None):
@@ -81,7 +83,7 @@ def run(doc, plans, skipped, warnings, steel_long, steel_trans, hooks, part_name
         return
 
     t, collector = kr.start_transaction(doc, u"КЖ: " + what["title"].lower())
-    failed, created, quantity = [], 0, 0
+    failed, created, quantity, settled = [], 0, 0, []
     try:
         if to_delete:
             doc.Delete(List[DB.ElementId](to_delete))
@@ -104,11 +106,15 @@ def run(doc, plans, skipped, warnings, steel_long, steel_trans, hooks, part_name
                 except Exception:
                     pass
                 st.Commit()
+                settled.extend(zip(bars, plan["specs"]))
                 created += len(bars)
                 quantity += q
             except Exception as ex:
                 st.RollBack()
                 failed.append(u"{} — {}".format(plan["title"], ex))
+        if len(plans) > 1 and settled:
+            doc.Regenerate()
+            kr.settle(doc, settled)
         t.Commit()
     except Exception:
         if t.GetStatus() == DB.TransactionStatus.Started:

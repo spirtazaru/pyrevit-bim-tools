@@ -2,7 +2,7 @@
 """Комплексный аудит и очистка модели Revit.
 Раздел 1 «Связи, оси и уровни» — проверка рабочих наборов связей, осей и уровней + автоисправление.
 Раздел 2 «Аудит элементов» — 4 отдельные колонки с сортировкой, выпадающие мультифильтры с чекбоксами
-         «Выбрать все», оранжевая кнопка «Обновить элементы» слева от галочки «Сканировать всю модель».
+         «Выбрать все», оранжевая кнопка «Обновить» слева от галочки «Сканировать всю модель».
 Раздел 3 «Создание РН» — создание рабочих наборов по CSV + кнопки «Скачать шаблон РН» и «Скачать список РН из проекта».
 Раздел 4 «Закрепление» — контроль закрепления осей, уровней, связей и точек координат.
 Раздел 5 «Очистка модели» — ленивая проверка, выпадающий мультифильтр с чекбоксом «Выбрать все» по ВСЕМ категориям
@@ -35,6 +35,7 @@ from System.Windows.Media import Visual, VisualTreeHelper
 from System.Windows.Markup import XamlReader
 from System.Windows.Interop import WindowInteropHelper
 from System.Diagnostics import Process
+import bimtools_window
 from System.Collections.Generic import List
 from Autodesk.Revit.UI import IExternalEventHandler, ExternalEvent
 from pyrevit import revit, DB, forms
@@ -1832,6 +1833,60 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
         <!-- ======================================================= -->
         <!-- КАРТОЧКИ И КНОПКИ                                       -->
         <!-- ======================================================= -->
+        <!-- Всплывающие подсказки: светлая карточка с оранжевой рамкой, перенос длинного текста -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#FFFFFBF7"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="BorderBrush" Value="#99FF7A1A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="MaxWidth" Value="420"/>
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Галочки в стиле окна: скруглённый квадрат, оранжевая заливка при выборе, черта — «выбрано частично» -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border Name="box" Width="18" Height="18" CornerRadius="5" Background="#E6FFFFFF" BorderBrush="#80FF7A1A" BorderThickness="1" VerticalAlignment="Center">
+                                <Grid>
+                                    <Path Name="mark" Data="M3.5,9 L7.5,13 L14.5,5.5" Stroke="White" StrokeThickness="2.2" Visibility="Hidden"/>
+                                    <Rectangle Name="part" Width="8" Height="2.4" Fill="White" Visibility="Hidden"/>
+                                </Grid>
+                            </Border>
+                            <ContentPresenter Name="text" VerticalAlignment="Center" Margin="8,0,0,0" RecognizesAccessKey="True"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Content" Value="{x:Null}"><Setter TargetName="text" Property="Margin" Value="0"/></Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FFFF7A1A"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FF2B2118"/></Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="mark" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="{x:Null}">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="part" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="GlassCard" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource GlassFill}"/>
             <Setter Property="BorderBrush" Value="#80FFFFFF"/>
@@ -1853,6 +1908,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.9"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.75"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF2B2118"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1874,6 +1931,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFFFFF"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFEBD9"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FFFF7A1A"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -2356,12 +2415,12 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="АУДИТ МОДЕЛИ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navLinks" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Связи, оси и уровни"/>
-                                <RadioButton Name="nav3D" GroupName="nav" Style="{StaticResource NavItem}" Content="Аудит элементов"/>
-                                <RadioButton Name="navCSV" GroupName="nav" Style="{StaticResource NavItem}" Content="Создание РН"/>
-                                <RadioButton Name="navPin" GroupName="nav" Style="{StaticResource NavItem}" Content="Закрепление"/>
-                                <RadioButton Name="navPurge" GroupName="nav" Style="{StaticResource NavItem}" Content="Очистка модели"/>
-                                <RadioButton Name="navHealth" GroupName="nav" Style="{StaticResource NavItem}" Content="Здоровье модели"/>
+                                <RadioButton Name="navLinks" ToolTip="Рабочие наборы связей, осей и уровней: что не на своём месте и автоисправление" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Связи, оси и уровни"/>
+                                <RadioButton Name="nav3D" ToolTip="Все элементы модели с категорией, типом и рабочим набором: фильтры, изоляция, перенос в РН" GroupName="nav" Style="{StaticResource NavItem}" Content="Аудит элементов"/>
+                                <RadioButton Name="navCSV" ToolTip="Создать рабочие наборы по списку или CSV-файлу" GroupName="nav" Style="{StaticResource NavItem}" Content="Создание РН"/>
+                                <RadioButton Name="navPin" ToolTip="Закреплены ли оси, уровни, связи и точки координат" GroupName="nav" Style="{StaticResource NavItem}" Content="Закрепление"/>
+                                <RadioButton Name="navPurge" ToolTip="Неиспользуемые семейства, виды, DWG, изображения и т. п. — удаление отмеченных" GroupName="nav" Style="{StaticResource NavItem}" Content="Очистка модели"/>
+                                <RadioButton Name="navHealth" ToolTip="Индекс здоровья: предупреждения и проблемы модели с выделением элементов" GroupName="nav" Style="{StaticResource NavItem}" Content="Здоровье модели"/>
                             </StackPanel>
 
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
@@ -2431,8 +2490,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbLinksStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                                <Button Name="btnRefreshLinks" Grid.Column="1" Content="Обновить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                                <Button Name="btnFixLinks" Grid.Column="2" Content="Исправить ошибки автоматически" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnRefreshLinks" ToolTip="Пересчитать проверку связей, осей и уровней" Grid.Column="1" Content="Обновить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                                <Button Name="btnFixLinks" ToolTip="Перенести связи, оси и уровни в правильные рабочие наборы (сначала список и подтверждение)" Grid.Column="2" Content="Исправить ошибки автоматически" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -2457,10 +2516,10 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <TextBlock Text="Аудит элементов модели" FontSize="26" FontWeight="Bold"/>
                                     <TextBlock Text="Сортировка по любой колонке (клик по шапке), выпадающие фильтры по Категории и РН" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0"/>
                                 </StackPanel>
-                                <!-- Оранжевая кнопка «Обновить элементы» слева от галочки «Сканировать всю модель» -->
-                                <Button Name="btnRefreshAudit" Grid.Column="1" Content="Обновить элементы" Style="{StaticResource PrimaryButton}" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                                <!-- Оранжевая кнопка «Обновить» слева от галочки «Сканировать всю модель» -->
+                                <Button Name="btnRefreshAudit" ToolTip="Заново собрать элементы модели с учётом галочки «Сканировать всю модель»" Grid.Column="1" Content="Обновить" Style="{StaticResource PrimaryButton}" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                 <Border Grid.Column="2" Background="#CCFFFFFF" CornerRadius="19" Padding="14,0" Height="38" BorderBrush="#66FF7A1A" BorderThickness="1" VerticalAlignment="Center">
-                                    <CheckBox Name="chkScanWholeModel" IsChecked="True" Content="Сканировать всю модель (вкл. закрытые РН)" FontWeight="SemiBold" VerticalAlignment="Center" VerticalContentAlignment="Center" Cursor="Hand"/>
+                                    <CheckBox Name="chkScanWholeModel" ToolTip="Включено — все элементы модели, в том числе в закрытых рабочих наборах; выключено — только видимые на 3D-виде" IsChecked="True" Content="Сканировать всю модель (вкл. закрытые РН)" FontWeight="SemiBold" VerticalAlignment="Center" VerticalContentAlignment="Center" Cursor="Hand"/>
                                 </Border>
                             </Grid>
 
@@ -2490,7 +2549,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
 
                                 <!-- Выпадающий мультифильтр по КАТЕГОРИИ с галочкой «Выбрать все» -->
                                 <Grid Grid.Column="2">
-                                    <ToggleButton Name="btnAuditCatFilter" Style="{StaticResource FilterPillToggle}">
+                                    <ToggleButton Name="btnAuditCatFilter" ToolTip="Показать только выбранные категории" Style="{StaticResource FilterPillToggle}">
                                         <TextBlock Name="tbAuditCatFilterLabel" Text="Категории: Все" FontWeight="Bold" FontSize="13" TextTrimming="CharacterEllipsis"/>
                                     </ToggleButton>
                                     <Popup Name="popAuditCatFilter"
@@ -2507,7 +2566,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                                     <RowDefinition Height="*"/>
                                                 </Grid.RowDefinitions>
                                                 <Border Grid.Row="0" Background="#FFFDF4EA" CornerRadius="10" Padding="8,6" Margin="0,0,0,8" BorderBrush="#40FF7A1A" BorderThickness="1">
-                                                    <CheckBox Name="chkAuditCatSelectAll" IsChecked="True" Content="Выбрать все категории" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
+                                                    <CheckBox Name="chkAuditCatSelectAll" ToolTip="Отметить или снять все категории" IsChecked="True" Content="Выбрать все категории" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
                                                 </Border>
                                                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                                                     <ItemsControl Name="icAuditCatFilters">
@@ -2525,7 +2584,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
 
                                 <!-- Выпадающий мультифильтр по РАБОЧЕМУ НАБОРУ с галочкой «Выбрать все» -->
                                 <Grid Grid.Column="4">
-                                    <ToggleButton Name="btnAuditWsFilter" Style="{StaticResource FilterPillToggle}">
+                                    <ToggleButton Name="btnAuditWsFilter" ToolTip="Показать только выбранные рабочие наборы" Style="{StaticResource FilterPillToggle}">
                                         <TextBlock Name="tbAuditWsFilterLabel" Text="Рабочие наборы: Все" FontWeight="Bold" FontSize="13" TextTrimming="CharacterEllipsis"/>
                                     </ToggleButton>
                                     <Popup Name="popAuditWsFilter"
@@ -2542,7 +2601,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                                     <RowDefinition Height="*"/>
                                                 </Grid.RowDefinitions>
                                                 <Border Grid.Row="0" Background="#FFFDF4EA" CornerRadius="10" Padding="8,6" Margin="0,0,0,8" BorderBrush="#40FF7A1A" BorderThickness="1">
-                                                    <CheckBox Name="chkAuditWsSelectAll" IsChecked="True" Content="Выбрать все рабочие наборы" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
+                                                    <CheckBox Name="chkAuditWsSelectAll" ToolTip="Отметить или снять все рабочие наборы" IsChecked="True" Content="Выбрать все рабочие наборы" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
                                                 </Border>
                                                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                                                     <ItemsControl Name="icAuditWsFilters">
@@ -2558,7 +2617,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     </Popup>
                                 </Grid>
 
-                                <Button Name="btnResetAuditFilters" Grid.Column="6" Content="Сбросить фильтры" Style="{StaticResource GlassButton}" Padding="14,0"/>
+                                <Button Name="btnResetAuditFilters" ToolTip="Сбросить поиск и фильтры по категориям и рабочим наборам" Grid.Column="6" Content="Сбросить фильтры" Style="{StaticResource GlassButton}" Padding="14,0"/>
                             </Grid>
 
                             <!-- ТАБЛИЦА АУДИТА ЭЛЕМЕНТОВ: РОВНО 4 ОТДЕЛЬНЫЕ КОЛОНКИ С СОРТИРОВКОЙ -->
@@ -2625,10 +2684,10 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbAuditStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
-                                <Button Name="btnIsolateSelected" Grid.Column="1" Content="Изолировать на 3D" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnResetIsolation" Grid.Column="2" Content="Сбросить" Style="{StaticResource GlassButton}" Margin="0,0,12,0"/>
+                                <Button Name="btnIsolateSelected" ToolTip="Временно изолировать отмеченные элементы на 3D-виде и выделить их" Grid.Column="1" Content="Изолировать на 3D" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnResetIsolation" ToolTip="Снять временную изоляцию на 3D-виде" Grid.Column="2" Content="Сбросить" Style="{StaticResource GlassButton}" Margin="0,0,12,0"/>
                                 <ComboBox Name="cmbTargetWs" Tag="Целевой РН:" Grid.Column="3" Width="280" Style="{StaticResource PillComboBox}" Margin="0,0,10,0" ToolTip="Выберите целевой рабочий набор для переноса отмеченных элементов"/>
-                                <Button Name="btnMoveSelectedWs" Grid.Column="4" Content="Перенести в РН" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnMoveSelectedWs" ToolTip="Перенести отмеченные элементы в выбранный рабочий набор (сначала список и подтверждение)" Grid.Column="4" Content="Перенести в РН" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -2651,8 +2710,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <TextBlock Text="Создание рабочих наборов из CSV" FontSize="26" FontWeight="Bold"/>
                                     <TextBlock Text="Формат строк: Имя рабочего набора ; Ключевое слово для поиска связи (необязательно)" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0"/>
                                 </StackPanel>
-                                <Button Name="btnDownloadCsvTemplate" Grid.Column="1" Content="Скачать шаблон РН" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                                <Button Name="btnExportProjectWsCsv" Grid.Column="2" Content="Скачать список РН из проекта" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
+                                <Button Name="btnDownloadCsvTemplate" ToolTip="Сохранить пример CSV: имя рабочего набора и ключевые слова" Grid.Column="1" Content="Скачать шаблон РН" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                <Button Name="btnExportProjectWsCsv" ToolTip="Сохранить рабочие наборы этой модели в CSV — для другого проекта" Grid.Column="2" Content="Скачать список РН из проекта" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
                             </Grid>
                             <Border Grid.Row="1" Style="{StaticResource GlassCard}" Padding="16">
                                 <TextBox Name="tbCsvInput" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="Transparent" BorderThickness="0" FontFamily="Consolas" FontSize="14" TextWrapping="Wrap"/>
@@ -2664,8 +2723,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbCsvStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                                <Button Name="btnLoadCsvFile" Grid.Column="1" Content="Загрузить CSV файл..." Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                                <Button Name="btnCreateWsFromCsv" Grid.Column="2" Content="Создать рабочие наборы" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnLoadCsvFile" ToolTip="Загрузить список рабочих наборов из CSV в поле слева" Grid.Column="1" Content="Загрузить CSV файл..." Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                                <Button Name="btnCreateWsFromCsv" ToolTip="Создать недостающие рабочие наборы из списка (сначала список и подтверждение)" Grid.Column="2" Content="Создать рабочие наборы" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -2684,18 +2743,18 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                 <TextBlock Text="Проверка закрепления (Pin) осей, уровней, связей RVT и базовых точек координат" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0"/>
                             </StackPanel>
                             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="4,0,4,10">
-                                <CheckBox Name="chkPinGrids" Content="Оси" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
-                                <CheckBox Name="chkPinLevels" Content="Уровни" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
-                                <CheckBox Name="chkPinLinks" Content="Связи RVT" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
-                                <CheckBox Name="chkPinPoints" Content="Точки координат" IsChecked="True" FontWeight="SemiBold" Margin="0,0,24,0" Cursor="Hand"/>
-                                <CheckBox Name="chkPinOnlyUnpinned" Content="Показывать только незакрепленные" IsChecked="False" FontWeight="SemiBold" Foreground="#FFC24E00" Cursor="Hand"/>
+                                <CheckBox Name="chkPinGrids" ToolTip="Показывать оси" Content="Оси" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
+                                <CheckBox Name="chkPinLevels" ToolTip="Показывать уровни" Content="Уровни" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
+                                <CheckBox Name="chkPinLinks" ToolTip="Показывать связи RVT" Content="Связи RVT" IsChecked="True" FontWeight="SemiBold" Margin="0,0,16,0" Cursor="Hand"/>
+                                <CheckBox Name="chkPinPoints" ToolTip="Показывать базовую точку и точку съёмки" Content="Точки координат" IsChecked="True" FontWeight="SemiBold" Margin="0,0,24,0" Cursor="Hand"/>
+                                <CheckBox Name="chkPinOnlyUnpinned" ToolTip="Скрыть уже закреплённые элементы" Content="Показывать только незакрепленные" IsChecked="False" FontWeight="SemiBold" Foreground="#FFC24E00" Cursor="Hand"/>
                             </StackPanel>
                             <Border Grid.Row="2" Style="{StaticResource GlassCard}" Padding="12,10">
                                 <DataGrid Name="dgPins" AutoGenerateColumns="False" IsReadOnly="False">
                                     <DataGrid.Columns>
                                         <DataGridTemplateColumn Width="44" CanUserSort="False">
                                             <DataGridTemplateColumn.Header>
-                                                <CheckBox Name="chkPinSelectAll" Cursor="Hand"/>
+                                                <CheckBox Name="chkPinSelectAll" ToolTip="Отметить или снять все элементы в таблице" Cursor="Hand"/>
                                             </DataGridTemplateColumn.Header>
                                             <DataGridTemplateColumn.CellTemplate>
                                                 <DataTemplate>
@@ -2736,9 +2795,9 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbPinStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                                <Button Name="btnRefreshPins" Grid.Column="1" Content="Обновить" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnUnpinSelected" Grid.Column="2" Content="Открепить выбранные" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnPinSelected" Grid.Column="3" Content="Закрепить выбранные (Pin)" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnRefreshPins" ToolTip="Заново проверить закрепление" Grid.Column="1" Content="Обновить" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnUnpinSelected" ToolTip="Открепить отмеченные элементы (с подтверждением)" Grid.Column="2" Content="Открепить выбранные" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnPinSelected" ToolTip="Закрепить отмеченные элементы (с подтверждением)" Grid.Column="3" Content="Закрепить выбранные (Pin)" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -2763,8 +2822,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <TextBlock Text="Выбирайте нужные категории через мультифильтр сверху или раскрывайте разделы кликом по заголовку" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <Button Name="btnPurgeExpandAll" Content="Развернуть все" Style="{StaticResource GlassButton}" Height="34" Padding="14,0" Margin="0,0,6,0"/>
-                                    <Button Name="btnPurgeCollapseAll" Content="Свернуть все" Style="{StaticResource GlassButton}" Height="34" Padding="14,0"/>
+                                    <Button Name="btnPurgeExpandAll" ToolTip="Раскрыть все группы" Content="Развернуть все" Style="{StaticResource GlassButton}" Height="34" Padding="14,0" Margin="0,0,6,0"/>
+                                    <Button Name="btnPurgeCollapseAll" ToolTip="Свернуть все группы" Content="Свернуть все" Style="{StaticResource GlassButton}" Height="34" Padding="14,0"/>
                                 </StackPanel>
                             </Grid>
 
@@ -2794,7 +2853,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
 
                                 <!-- Выпадающий мультифильтр ВСЕХ КАТЕГОРИЙ очистки с галочкой «Выбрать все» -->
                                 <Grid Grid.Column="2">
-                                    <ToggleButton Name="btnPurgeCatFilter" Style="{StaticResource FilterPillToggle}">
+                                    <ToggleButton Name="btnPurgeCatFilter" ToolTip="Показать только выбранные категории" Style="{StaticResource FilterPillToggle}">
                                         <TextBlock Name="tbPurgeCatFilterLabel" Text="Категории: Все" FontWeight="Bold" FontSize="13" TextTrimming="CharacterEllipsis"/>
                                     </ToggleButton>
                                     <Popup Name="popPurgeCatFilter"
@@ -2811,7 +2870,7 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                                     <RowDefinition Height="*"/>
                                                 </Grid.RowDefinitions>
                                                 <Border Grid.Row="0" Background="#FFFDF4EA" CornerRadius="10" Padding="8,6" Margin="0,0,0,8" BorderBrush="#40FF7A1A" BorderThickness="1">
-                                                    <CheckBox Name="chkPurgeCatSelectAll" IsChecked="True" Content="Выбрать все категории" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
+                                                    <CheckBox Name="chkPurgeCatSelectAll" ToolTip="Отметить или снять все категории" IsChecked="True" Content="Выбрать все категории" FontWeight="Bold" FontSize="12" Foreground="#FFC24E00" Cursor="Hand"/>
                                                 </Border>
                                                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                                                     <ItemsControl Name="icPurgeCatFilters">
@@ -2832,8 +2891,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                 </Border>
 
                                 <StackPanel Grid.Column="6" Orientation="Horizontal">
-                                    <Button Name="btnPurgeSelectUnused" Content="Отметить неиспользуемые" Style="{StaticResource GlassButton}" Height="38" Padding="14,0" Margin="0,0,6,0"/>
-                                    <Button Name="btnPurgeClearChecks" Content="Снять все" Style="{StaticResource GlassButton}" Height="38" Padding="14,0"/>
+                                    <Button Name="btnPurgeSelectUnused" ToolTip="Отметить все неиспользуемые элементы в показанных группах" Content="Отметить неиспользуемые" Style="{StaticResource GlassButton}" Height="38" Padding="14,0" Margin="0,0,6,0"/>
+                                    <Button Name="btnPurgeClearChecks" ToolTip="Снять все отметки" Content="Снять все" Style="{StaticResource GlassButton}" Height="38" Padding="14,0"/>
                                 </StackPanel>
                             </Grid>
 
@@ -3024,8 +3083,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbPurgeStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                                <Button Name="btnRefreshPurge" Grid.Column="1" Content="Пересканировать" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnDeletePurgeSelected" Grid.Column="2" Content="Удалить отмеченные элементы" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnRefreshPurge" ToolTip="Заново найти неиспользуемые элементы" Grid.Column="1" Content="Обновить" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnDeletePurgeSelected" ToolTip="Удалить отмеченные элементы (сначала список и подтверждение; отмена — Ctrl+Z)" Grid.Column="2" Content="Удалить отмеченные элементы" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -3187,8 +3246,8 @@ XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presen
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbHealthStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                                <Button Name="btnSelectHealthElements" Grid.Column="1" Content="Выделить выбранные в модели" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnRefreshHealth" Grid.Column="2" Content="Обновить диагностику" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnSelectHealthElements" ToolTip="Выделить в модели элементы, отмеченные в раскрытых проблемах" Grid.Column="1" Content="Выделить выбранные в модели" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnRefreshHealth" ToolTip="Пересчитать индекс здоровья модели" Grid.Column="2" Content="Обновить" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -3241,9 +3300,11 @@ class AuditWindow(object):
         dialog_owner = self.win
         try:
             helper = WindowInteropHelper(self.win)
-            helper.Owner = Process.GetCurrentProcess().MainWindowHandle
+            helper.Owner = bimtools_window.revit_window_handle()
         except Exception:
             pass
+        # По размеру экрана (1240×820 не помещается на ноутбуке), прежние размер и положение
+        bimtools_window.setup(self.win)
 
         self.ext_handler = ActionEventHandler()
         self.ext_handler.window = self
@@ -3318,7 +3379,7 @@ class AuditWindow(object):
         self.btnFixLinks.Click += lambda s, e: self.trigger_action('fix_links')
         self.dgLinks.MouseDoubleClick += self.on_link_double_click
 
-        # Раздел 2: Аудит элементов (оранжевая кнопка Обновить элементы + выпадающие мультифильтры с галочкой Выбрать все)
+        # Раздел 2: Аудит элементов (оранжевая кнопка «Обновить» + выпадающие мультифильтры с галочкой Выбрать все)
         self.btnRefreshAudit.Click += lambda s, e: self.refresh_audit_data()
         self.chkScanWholeModel.Click += lambda s, e: self.refresh_audit_data()
         self.tbSearchAudit.TextChanged += lambda s, e: self.apply_audit_filters()
@@ -3948,6 +4009,17 @@ class AuditWindow(object):
                 show_message(u"Введите список рабочих наборов или загрузите CSV-файл.")
                 return
             existing = {norm_name(w.Name) for w in get_user_worksets(doc)}
+            bad = [n for n, _ in rows if any(ch in n for ch in BAD_WS_CHARS)]
+            new_names = []
+            for n, _ in rows:
+                if n not in bad and norm_name(n) not in existing and norm_name(n) not in [norm_name(x) for x in new_names]:
+                    new_names.append(n)
+            if not new_names:
+                self.tbCsvStatus.Text = u"Новых рабочих наборов нет: все уже есть в модели{}".format(
+                    u" • недопустимые имена: {}".format(u", ".join(bad)) if bad else u"")
+                return
+            if not confirm_action(u"Создать рабочие наборы ({} шт.)?".format(len(new_names)), new_names):
+                return
             created = 0
             t = DB.Transaction(doc, u"Создание РН по шаблону CSV")
             t.Start()
@@ -3967,7 +4039,8 @@ class AuditWindow(object):
                 raise
             self.refresh_links_view()
             self.refresh_health_view()
-            self.tbCsvStatus.Text = u"Создано новых рабочих наборов: {}".format(created)
+            self.tbCsvStatus.Text = u"Создано новых рабочих наборов: {}{}".format(
+                created, u" • пропущены (недопустимые символы): {}".format(u", ".join(bad)) if bad else u"")
 
         elif action == 'set_pin_state':
             pin_val = bool(payload)
@@ -4081,9 +4154,14 @@ def activate_existing():
     return False
 
 
-if not doc.IsWorkshared:
-    show_message(u"Модель не является совместной (рабочие наборы не включены).")
-elif not activate_existing():
-    ui = AuditWindow()
-    System.AppDomain.CurrentDomain.SetData(APP_KEY, ui)
-    ui.show()
+try:
+    if not doc.IsWorkshared:
+        show_message(u"Модель не является совместной (рабочие наборы не включены).")
+    elif not activate_existing():
+        ui = AuditWindow()
+        System.AppDomain.CurrentDomain.SetData(APP_KEY, ui)
+        ui.show()
+except Exception:
+    import traceback
+    System.AppDomain.CurrentDomain.SetData(APP_KEY, None)
+    show_message(u"Ошибка запуска аудита:\n{}".format(traceback.format_exc()), title=u"Ошибка")

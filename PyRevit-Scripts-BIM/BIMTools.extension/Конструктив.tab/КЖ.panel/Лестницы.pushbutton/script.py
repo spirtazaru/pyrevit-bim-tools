@@ -606,9 +606,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • ЛЕСТНИЦЫ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navSection" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Марш"/>
-                                <RadioButton Name="navLength" GroupName="nav" Style="{StaticResource NavItem}" Content="Площадки"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navSection" ToolTip="Армирование марша" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Марш"/>
+                                <RadioButton Name="navLength" ToolTip="Армирование площадок: нижняя и верхняя сетки" GroupName="nav" Style="{StaticResource NavItem}" Content="Площадки"/>
+                                <RadioButton Name="navParams" ToolTip="Материалы и общие настройки" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -696,7 +696,7 @@ __TITLEBAR__
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Name="tbInfo" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
-                            <Button Name="btnRun" Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnRun" ToolTip="Создать арматуру по настройкам окна. Сначала — список элементов и подтверждение; старая арматура удаляется только после отдельного подтверждения." Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>

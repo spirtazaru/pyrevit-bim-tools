@@ -2,11 +2,13 @@
 """Сервис КЖ (pyRevit / IronPython 2.7).
 
 Разделы окна:
-  Проверка    — стержни вне бетона, защитный слой меньше нормы, шаг набора больше нормы; выделение в модели.
+  Проверка    — стержни вне бетона, защитный слой меньше нормы, шаг набора больше нормы, конструктивные
+                требования СП 63 к колоннам и балкам (Ø, шаг хомутов); выделение и показ в модели.
   Ведомость   — марки АрмМарка (одинаковые стержни — одна марка) и расход стали
-                «конструкция × класс × диаметр» с учётом АрмЧисло; выгрузка в CSV.
+                «конструкция × класс × диаметр» с учётом АрмЧисло; оформление по ГОСТ 21.501:
+                спецификация Revit, таблицы на чертёжном виде, Excel; CSV; показ строки в модели.
   Обновление  — основы, изменённые после армирования (по отпечатку геометрии): повторный запуск
-                кнопки армирования для отмеченных.
+                кнопки армирования для отмеченных или для всех изменённых; показ в модели.
 Область: выбранные основы или стержни; ничего не выбрано — вся модель.
 """
 __title__ = u"Сервис"
@@ -22,6 +24,7 @@ import traceback
 
 from System.Collections.Generic import List
 from System.Windows import RoutedEventHandler
+from System.Windows.Controls import Button
 from System.Windows.Controls.Primitives import ToggleButton
 from Microsoft.Win32 import SaveFileDialog
 
@@ -32,14 +35,14 @@ for _name in [n for n in sys.modules if n == "kzh" or n.startswith("kzh.")]:
     del sys.modules[_name]
 
 from pyrevit import DB
-from kzh import norms, params, service
+from kzh import gost, norms, params, service
 from kzh import ui
 from kzh.ui import show_message, Option
 
 uidoc = __revit__.ActiveUIDocument
 doc = uidoc.Document
 
-KIND_TITLES = {'out': u"Вне бетона", 'cover': u"Защитный слой", 'spacing': u"Шаг"}
+KIND_TITLES = {'out': u"Вне бетона", 'cover': u"Защитный слой", 'spacing': u"Шаг", 'norm': u"СП 63"}
 
 
 class IssueRow(object):
@@ -62,7 +65,7 @@ def issue_rows(issues):
             groups[key] = []
             order.append(key)
         groups[key].append(i)
-    kinds = ('out', 'cover', 'spacing')
+    kinds = ('out', 'cover', 'spacing', 'norm')
     return [IssueRow(groups[k]) for k in sorted(order, key=lambda k: (kinds.index(k[0]), k[1], k[2]))]
 
 
@@ -143,7 +146,8 @@ def _footer(status, buttons):
 PAGE_CHECK = _page(
     u"pageCheck", True, u"Проверка армирования",
     u"Стержни вне бетона (выход в соседний бетонный элемент — не ошибка), защитный слой сбоку стержня меньше "
-    u"нормы СП 63 для выбранных условий, шаг рабочих стержней стен и плит больше нормы",
+    u"нормы СП 63 для выбранных условий, шаг рабочих стержней стен и плит больше нормы, конструктивные "
+    u"требования СП 63 к колоннам и балкам: Ø продольных и хомутов, шаг хомутов",
     u"""<Border Grid.Row="1" Style="{StaticResource GlassCard}" Padding="16,10" Margin="0,0,0,12">
     <StackPanel Orientation="Horizontal">
         <TextBlock Text="Условия эксплуатации:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
@@ -152,19 +156,24 @@ PAGE_CHECK = _page(
 </Border>""",
     _row_list(u"icIssues", [(u"300", u"ОСНОВА"), (u"*", u"ЗАМЕЧАНИЕ"), (u"110", u"ЭЛЕМЕНТОВ"), (u"150", u"ПРОВЕРКА")],
               _cell(0, u"Host", True, extra=u' ToolTip="{Binding Host}"') + _cell(1, u"Text", extra=u' ToolTip="{Binding Text}"') + _cell(2, u"Count") + _pill(3)),
-    _footer(u"tbCheckStatus", [(u"btnSelectIssues", u"Выделить в модели", u"GlassButton"),
+    _footer(u"tbCheckStatus", [(u"btnSelectIssues", u"Показать в модели", u"GlassButton"),
                                (u"btnCheck", u"Проверить", u"PrimaryButton")]))
 
 PAGE_SCHEDULE = _page(
     u"pageSchedule", False, u"Марки и ведомость",
     u"Одинаковые стержни (конструкция, диаметр, класс, форма, длина) получают одну марку АрмМарка; нумерация — "
-    u"в пределах конструкции. Количество и масса — с учётом АрмЧисло",
+    u"в пределах конструкции. Количество и масса — с учётом АрмЧисло. Оформление по ГОСТ 21.501: спецификация "
+    u"Revit (живая), таблицы спецификации и ведомости расхода стали на чертёжном виде, Excel",
     u"",
     _row_list(u"icSchedule", [(u"*", u"КОНСТРУКЦИЯ"), (u"110", u"КЛАСС"), (u"90", u"ДИАМЕТР"), (u"110", u"КОЛ-ВО, ШТ"),
-                              (u"110", u"ДЛИНА, М"), (u"110", u"МАССА, КГ")],
+                              (u"110", u"ДЛИНА, М"), (u"110", u"МАССА, КГ"), (u"110", u"")],
               _cell(0, u"Part", extra=u' FontWeight="{Binding FontWeight}"') + _cell(1, u"Class") + _cell(2, u"D") +
-              _cell(3, u"Count") + _cell(4, u"Length") + _cell(5, u"Mass", extra=u' FontWeight="{Binding FontWeight}"')),
-    _footer(u"tbScheduleStatus", [(u"btnCsv", u"Выгрузить CSV", u"GlassButton"),
+              _cell(3, u"Count") + _cell(4, u"Length") + _cell(5, u"Mass", extra=u' FontWeight="{Binding FontWeight}"') +
+              u'<Button Grid.Column="6" Content="В модели" Style="{StaticResource GlassButton}" Height="28" FontSize="12" '
+              u'ToolTip="Выделить и показать эти стержни в модели (окно закроется)"/>'),
+    _footer(u"tbScheduleStatus", [(u"btnCsv", u"CSV", u"GlassButton"), (u"btnXlsx", u"Excel", u"GlassButton"),
+                                  (u"btnGostTable", u"Таблицы ГОСТ", u"GlassButton"),
+                                  (u"btnRevitSpec", u"Спецификация Revit", u"GlassButton"),
                                   (u"btnMarks", u"Присвоить марки", u"PrimaryButton")]))
 
 PAGE_UPDATE = _page(
@@ -177,7 +186,9 @@ PAGE_UPDATE = _page(
                            (u"90", u"КНОПКА"), (u"250", u"СОСТОЯНИЕ")],
               u'<CheckBox Grid.Column="0" IsChecked="{Binding IsChecked, Mode=OneTime}" Style="{StaticResource PillCheck}" VerticalAlignment="Center"/>' +
               _cell(1, u"Title", True, extra=u' ToolTip="{Binding Title}"') + _cell(2, u"Category") + _cell(3, u"Rebar") + _cell(4, u"Button") + _pill(5)),
-    _footer(u"tbUpdateStatus", [(u"btnUpdate", u"Армировать отмеченные заново", u"PrimaryButton")]))
+    _footer(u"tbUpdateStatus", [(u"btnShowHosts", u"Показать в модели", u"GlassButton"),
+                                (u"btnUpdateAll", u"Обновить все изменённые", u"GlassButton"),
+                                (u"btnUpdate", u"Армировать отмеченные заново", u"PrimaryButton")]))
 
 XAML_UI = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -248,8 +259,8 @@ __PAGES__
 CONTROL_NAMES = (
     "tbSidebarCount", "tbSidebarScope",
     "cbCondition", "icIssues", "tbCheckStatus", "btnSelectIssues", "btnCheck",
-    "icSchedule", "tbScheduleStatus", "btnCsv", "btnMarks",
-    "icHosts", "tbUpdateStatus", "btnUpdate",
+    "icSchedule", "tbScheduleStatus", "btnCsv", "btnXlsx", "btnGostTable", "btnRevitSpec", "btnMarks",
+    "icHosts", "tbUpdateStatus", "btnShowHosts", "btnUpdateAll", "btnUpdate",
 )
 NAV_PAGES = (("navCheck", "pageCheck"), ("navSchedule", "pageSchedule"), ("navUpdate", "pageUpdate"))
 
@@ -260,6 +271,8 @@ class ServiceWindow(ui.KzhWindow):
         self.rebars = rebars
         self.issues = []
         self.update_rows = None         # отмеченные основы для повторного армирования (после закрытия окна)
+        self.show_ids = None            # что выделить и показать в модели после закрытия окна
+        self.open_view = None           # созданный вид — открыть после закрытия окна
         self.tbSidebarCount.Text = u"{}".format(len(rebars))
         self.tbSidebarScope.Text = scope_text
         self.cbCondition.ItemsSource = [Option(u"{} — {} мм".format(t, c), k) for k, t, c in norms.cover_conditions()]
@@ -270,7 +283,13 @@ class ServiceWindow(ui.KzhWindow):
         self.btnSelectIssues.Click += self.on_select_issues
         self.btnMarks.Click += self.on_marks
         self.btnCsv.Click += self.on_csv
+        self.btnXlsx.Click += self.on_xlsx
+        self.btnGostTable.Click += self.on_gost_table
+        self.btnRevitSpec.Click += self.on_revit_spec
         self.btnUpdate.Click += self.on_update
+        self.btnUpdateAll.Click += self.on_update_all
+        self.btnShowHosts.Click += self.on_show_hosts
+        self.icSchedule.AddHandler(Button.ClickEvent, RoutedEventHandler(self.on_show_row))
         # Отметки строк: привязка к объектам IronPython односторонняя — состояние забирается из события
         self.icHosts.AddHandler(ToggleButton.CheckedEvent, RoutedEventHandler(self.on_host_check))
         self.icHosts.AddHandler(ToggleButton.UncheckedEvent, RoutedEventHandler(self.on_host_check))
@@ -283,11 +302,11 @@ class ServiceWindow(ui.KzhWindow):
     # ----------------------------------------------------------
     def on_check(self, sender, args):
         condition = ui.selected_value(self.cbCondition, "indoor_normal")
-        self.issues = service.check_rebar(doc, self.rebars, condition)
+        self.issues = service.check_rebar(doc, self.rebars, condition) + service.check_norms(doc, self.rebars)
         self.icIssues.ItemsSource = issue_rows(self.issues)
         bad = len(set(i.rebar_id.IntegerValue for i in self.issues))
         counts = [u"{}: {}".format(KIND_TITLES[k], sum(1 for i in self.issues if i.kind == k))
-                  for k in ('out', 'cover', 'spacing')]
+                  for k in ('out', 'cover', 'spacing', 'norm')]
         self.tbCheckStatus.Text = (u"Проверено элементов арматуры: {} • с замечаниями: {} • {}".format(
             len(self.rebars), bad, u" • ".join(counts)) if self.issues else
             u"Проверено элементов арматуры: {} • замечаний нет".format(len(self.rebars)))
@@ -296,10 +315,7 @@ class ServiceWindow(ui.KzhWindow):
         if not self.issues:
             show_message(u"Замечаний нет: сначала нажмите «Проверить».", kind='info')
             return
-        ids = List[DB.ElementId]()
-        for i_id in sorted(set(i.rebar_id.IntegerValue for i in self.issues)):
-            ids.Add(DB.ElementId(i_id))
-        uidoc.Selection.SetElementIds(ids)
+        self.show_ids = [DB.ElementId(i) for i in sorted(set(i.rebar_id.IntegerValue for i in self.issues))]
         self.window.Close()
 
     # ----------------------------------------------------------
@@ -349,6 +365,65 @@ class ServiceWindow(ui.KzhWindow):
         except Exception as ex:
             show_message(u"Не удалось записать файл:\n{}".format(ex))
 
+    def on_show_row(self, sender, args):
+        """Кнопка «В модели» в строке ведомости: выделить и показать её стержни после закрытия окна."""
+        row = getattr(args.OriginalSource, 'DataContext', None)
+        if isinstance(row, service.ScheduleRow) and row.ids:
+            self.show_ids = list(row.ids)
+            self.window.Close()
+
+    def _spec_rows(self):
+        return gost.spec_rows(doc, self.marks)
+
+    def on_xlsx(self, sender, args):
+        dialog = SaveFileDialog()
+        dialog.Filter = u"Книга Excel (*.xlsx)|*.xlsx"
+        dialog.FileName = u"Спецификация и ведомость стали — {}.xlsx".format(doc.Title)
+        if not dialog.ShowDialog():
+            return
+        try:
+            gost.write_xlsx(dialog.FileName, gost.excel_sheets(self._spec_rows()))
+            self.tbScheduleStatus.Text = u"Выгружено: {}".format(dialog.FileName)
+        except Exception as ex:
+            show_message(u"Не удалось записать файл: {}".format(ex))
+
+    def on_gost_table(self, sender, args):
+        rows = self._spec_rows()
+        if not show_message(u"Создать чертёжный вид со спецификацией (позиций: {}) и ведомостью расхода стали "
+                            u"по ГОСТ 21.501? Позиции — по маркам, как в списке «Присвоить марки». "
+                            u"Модель не меняется: добавляются вид, линии и текст на нём и стили линий КЖ "
+                            u"(если их ещё нет).".format(len(rows)), ask=True, kind='info'):
+            return
+        t = DB.Transaction(doc, u"КЖ: таблицы ГОСТ")
+        t.Start()
+        try:
+            view = gost.draw_tables(doc, rows)
+            t.Commit()
+        except Exception:
+            t.RollBack()
+            raise
+        self.open_view = view.Id
+        self.tbScheduleStatus.Text = u"Создан вид «{}» — откроется после закрытия окна".format(view.Name)
+
+    def on_revit_spec(self, sender, args):
+        if not service.mark_param_ready(self.rebars):
+            show_message(u"Параметр АрмМарка не привязан к арматуре. Привяжите его кнопкой «Подготовка проекта».")
+            return
+        if not show_message(u"Создать спецификацию Revit по несущей арматуре: группы по АрмКонструкция, строка "
+                            u"на марку АрмМарка, Ø, длина, количество, общая длина? Спецификация живая — "
+                            u"обновляется вместе с моделью. Перед этим присвойте марки.", ask=True, kind='info'):
+            return
+        t = DB.Transaction(doc, u"КЖ: спецификация арматуры")
+        t.Start()
+        try:
+            vs = gost.create_revit_schedule(doc)
+            t.Commit()
+        except Exception:
+            t.RollBack()
+            raise
+        self.open_view = vs.Id
+        self.tbScheduleStatus.Text = u"Создана спецификация «{}» — откроется после закрытия окна".format(vs.Name)
+
     # ----------------------------------------------------------
     # ОБНОВЛЕНИЕ
     # ----------------------------------------------------------
@@ -364,6 +439,26 @@ class ServiceWindow(ui.KzhWindow):
         row = getattr(box, 'DataContext', None)
         if isinstance(row, service.HostRow):
             row.IsChecked = bool(box.IsChecked)
+
+    def on_show_hosts(self, sender, args):
+        rows = [r for r in self.host_rows if r.IsChecked]
+        if not rows:
+            show_message(u"Отметьте основы, которые нужно показать.", kind='info')
+            return
+        self.show_ids = [r.host.Id for r in rows]
+        self.window.Close()
+
+    def on_update_all(self, sender, args):
+        """Все изменённые после армирования основы — отмечаются и армируются заново (с подтверждением)."""
+        changed = [r for r in self.host_rows if r.state == 'changed' and r.cmd]
+        if not changed:
+            show_message(u"Изменённых после армирования основ нет.", kind='info')
+            return
+        for r in self.host_rows:
+            r.IsChecked = r in changed
+        self.icHosts.ItemsSource = None
+        self.icHosts.ItemsSource = self.host_rows
+        self.on_update(sender, args)
 
     def on_update(self, sender, args):
         rows = [r for r in self.host_rows if r.IsChecked and r.cmd]
@@ -413,6 +508,14 @@ def main():
     scope = u"Выбрано элементов: {}".format(len(selected)) if selected else u"Вся модель • {}".format(doc.Title)
     win = ServiceWindow(rebars, scope)
     win.show_modal()
+    if win.show_ids:
+        uidoc.Selection.SetElementIds(List[DB.ElementId](win.show_ids))
+        try:
+            uidoc.ShowElements(List[DB.ElementId](win.show_ids))
+        except Exception:
+            pass            # на текущем виде элементов нет — остаётся выделение
+    if win.open_view is not None:
+        uidoc.ActiveView = doc.GetElement(win.open_view)
     if win.update_rows:
         rerun_buttons(win.update_rows)
 

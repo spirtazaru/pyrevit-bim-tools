@@ -132,7 +132,7 @@ class Issue(object):
     def __init__(self, rb, host_title, kind, text):
         self.rebar_id = rb.Id
         self.host_title = host_title
-        self.kind = kind            # out | cover | spacing
+        self.kind = kind            # out | cover | spacing | norm
         self.text = text
 
 
@@ -209,25 +209,59 @@ def _spacing_limit(doc, host, rb, transverse):
     return None
 
 
-def _max_gap(rb):
-    """Наибольшее расстояние между соседними стержнями набора, мм (None — одиночный стержень)."""
+def _canon(v):
+    """Вектор с однозначным знаком (для сравнения параллельных направлений)."""
+    v = v.Normalize()
+    for x in (v.X, v.Y, v.Z):
+        if abs(x) > 1e-6:
+            return v if x > 0 else v.Negate()
+    return v
+
+
+def _set_row(rb):
+    """Раскладка набора прямых стержней: (ключ ряда, [положения стержней вдоль раскладки, мм]) или None.
+    Ключ ряда — направление стержней и раскладки; наборы с одним ключом на одной глубине (слой) дополняют
+    друг друга (стержни вразбежку, наборы по обе стороны отверстия)."""
     try:
         n = rb.NumberOfBarPositions
         acc = rb.GetShapeDrivenAccessor()
+        curves = rb.GetCenterlineCurves(False, True, True, ST.MultiplanarOption.IncludeOnlyPlanarCurves, 0)
     except Exception:
         return None
-    if n < 2:
+    if n < 2 or not curves:
         return None
-    pts = []
+    line = max(curves, key=lambda c: c.Length)
+    if not isinstance(line, DB.Line):
+        return None
+    u, w = _canon(line.Direction), _canon(acc.Normal)
+    p0 = line.GetEndPoint(0)
+    depth = mm(p0.DotProduct(u.CrossProduct(w)))
+    pos = []
     for i in range(n):
         try:
             if rb.DoesBarExistAtPosition(i) is False:
                 continue
         except Exception:
             pass
-        pts.append(acc.GetBarPositionTransform(i).Origin)
-    gaps = [a.DistanceTo(b) for a, b in zip(pts[:-1], pts[1:])]
-    return mm(max(gaps)) if gaps else None
+        pos.append(mm((p0 + acc.GetBarPositionTransform(i).Origin).DotProduct(w)))
+    a, b = sorted((mm(line.GetEndPoint(0).DotProduct(u)), mm(line.GetEndPoint(1).DotProduct(u))))
+    key = (round(u.X, 2), round(u.Y, 2), round(u.Z, 2), round(w.X, 2), round(w.Y, 2), round(w.Z, 2))
+    return key, sorted(pos), (a, b), depth
+
+
+def _max_gap(row, rows):
+    """Наибольший шаг в наборе row с учётом стержней других наборов того же слоя rows, заходящих в промежуток
+    и перекрывающих набор по длине стержня. Мм; None — стержень один."""
+    key, pos, (a, b), depth = row
+    if len(pos) < 2:
+        return None
+    others = sorted(x for r in rows if r is not row and abs(r[3] - depth) < 12.0 and min(b, r[2][1]) - max(a, r[2][0]) > 0.5 * min(b - a, r[2][1] - r[2][0])
+                    for x in r[1])
+    worst = 0.0
+    for lo, hi in zip(pos[:-1], pos[1:]):
+        inner = [lo] + [x for x in others if lo + 1.0 < x < hi - 1.0] + [hi]
+        worst = max(worst, max(q - p_ for p_, q in zip(inner[:-1], inner[1:])))
+    return worst
 
 
 def check_rebar(doc, rebars, condition, progress=None):
@@ -237,6 +271,7 @@ def check_rebar(doc, rebars, condition, progress=None):
     concrete = _Concrete(doc)
     hosts = {}
     issues = []
+    spaced, rows = [], {}
     for k, rb in enumerate(rebars):
         if progress is not None:
             progress(k, len(rebars))
@@ -279,9 +314,79 @@ def check_rebar(doc, rebars, condition, progress=None):
             issues.append(Issue(rb, title, 'cover', u"⌀{:.0f}: защитный слой {:.0f} мм < {:.0f} мм".format(
                 float(d), worst_cover, float(need))))
         limit = _spacing_limit(doc, host, rb, transverse)
-        gap = _max_gap(rb) if limit else None
+        row = _set_row(rb) if limit else None
+        if row is not None:
+            spaced.append((rb, title, d, limit, row))
+            rows.setdefault((hk, row[0]), []).append(row)
+    # Шаг — по всем наборам одного слоя основы: соседние наборы (вразбежку, у отверстий) дополняют друг друга
+    for rb, title, d, limit, row in spaced:
+        gap = _max_gap(row, rows[(rb.GetHostId().IntegerValue, row[0])])
         if gap is not None and gap > limit + 1:
             issues.append(Issue(rb, title, 'spacing', u"⌀{:.0f}: шаг {:.0f} мм > {:.0f} мм".format(float(d), gap, float(limit))))
+    return issues
+
+
+def _set_spacing_mm(rb):
+    """Шаг набора (мм) или None — один стержень / шаг не задан."""
+    try:
+        if rb.NumberOfBarPositions < 2:
+            return None
+        return mm(rb.MaxSpacing)
+    except Exception:
+        return None
+
+
+def check_norms(doc, rebars):
+    """Конструктивные требования СП 63 к колоннам и балкам (значения и пункты — из norms.json):
+    Ø продольных колонн, Ø и шаг хомутов колонн и балок. Возвращает [Issue] вида 'norm'."""
+    by_host = {}
+    for rb in rebars:
+        host = doc.GetElement(rb.GetHostId())
+        if host is not None and host.Category is not None:
+            by_host.setdefault(host.Id.IntegerValue, (host, []))[1].append(rb)
+    issues = []
+    col_id, beam_id = int(DB.BuiltInCategory.OST_StructuralColumns), int(DB.BuiltInCategory.OST_StructuralFraming)
+    for host, rbs in by_host.values():
+        cid = host.Category.Id.IntegerValue
+        if cid not in (col_id, beam_id):
+            continue
+        title = u"{} (id {})".format(element_name(host), host.Id.IntegerValue)
+        longs = [(rb, kr.bar_diameter_mm(bar_type(doc, rb)) or 0.0) for rb in rbs if not is_transverse(doc, rb)]
+        trans = [(rb, kr.bar_diameter_mm(bar_type(doc, rb)) or 0.0) for rb in rbs if is_transverse(doc, rb)]
+        d_long = max([d for _, d in longs] or [0.0])
+        if cid == col_id:
+            src = norms.source('column')
+            d_min = norms.column_rule('long_d_min')['value']
+            for rb, d in longs:
+                if d and d < d_min:
+                    issues.append(Issue(rb, title, 'norm', u"продольный ⌀{:.0f} < {} мм • {}".format(d, d_min, src)))
+            if d_long:
+                ds_min = norms.column_stirrup_d_min(d_long)
+                # Шаг — по наименьшему продольному: требование 15d жёстче для тонких стержней
+                s_max = norms.column_stirrup_spacing(min(d for _, d in longs if d) or d_long)
+                for rb, d in trans:
+                    if d and d < ds_min - 0.1:
+                        issues.append(Issue(rb, title, 'norm', u"хомут ⌀{:.0f} < {:.0f} мм (0,25d продольных) • {}".format(
+                            d, ds_min, src)))
+                    s = _set_spacing_mm(rb)
+                    if s and s > s_max + 1:
+                        issues.append(Issue(rb, title, 'norm', u"шаг хомутов {:.0f} > {:.0f} мм (15d, 500) • {}".format(
+                            s, s_max, src)))
+        else:
+            src = norms.source('beam')
+            bb = host.get_BoundingBox(None)
+            h = mm(bb.Max.Z - bb.Min.Z) if bb is not None else 0.0
+            if h <= 0:
+                continue
+            ds_min = norms.beam_stirrup_d_min(h)
+            s_max = norms.beam_stirrup_spacing(h - 50.0, support=False)    # h0 ≈ h − 50 мм; середина пролёта
+            for rb, d in trans:
+                if d and d < ds_min - 0.1:
+                    issues.append(Issue(rb, title, 'norm', u"хомут ⌀{:.0f} < {} мм • {}".format(d, ds_min, src)))
+                s = _set_spacing_mm(rb)
+                if s and s > s_max + 1:
+                    issues.append(Issue(rb, title, 'norm', u"шаг хомутов {:.0f} > {:.0f} мм (0,75h0, 500) • {}".format(
+                        s, s_max, src)))
     return issues
 
 
@@ -333,7 +438,8 @@ def apply_marks(doc, marks):
 
 
 class ScheduleRow(object):
-    def __init__(self, part, cls, d, count, length_m, mass_kg, total=False):
+    def __init__(self, part, cls, d, count, length_m, mass_kg, total=False, ids=None):
+        self.ids = ids or []        # наборы арматуры строки — для «Показать в модели»
         self.Part = part
         self.Class = cls
         self.D = u"⌀{:.0f}".format(float(d)) if d else u""
@@ -355,19 +461,21 @@ def schedule(doc, rebars):
         d = kr.bar_diameter_mm(bt) or 0.0
         key = (construction(doc, rb), steel_class(bt), d)
         k = arm_count(rb)
-        row = acc.setdefault(key, [0, 0.0])
+        row = acc.setdefault(key, [0, 0.0, []])
         row[0] += bar_count(rb) * k
         row[1] += mm(rb.TotalLength) / 1000.0 * k
+        row[2].append(rb.Id)
     rows, total = [], 0.0
     for part in sorted(set(k[0] for k in acc)):
         part_mass = 0.0
         for key in sorted((k for k in acc if k[0] == part), key=lambda k: (k[1], k[2])):
-            count, length = acc[key]
+            count, length, ids = acc[key]
             mass = length * (norms.mass_per_m(key[2]) or 0.0)
             part_mass += mass
-            rows.append(ScheduleRow(part, key[1], key[2], count, length, mass))
+            rows.append(ScheduleRow(part, key[1], key[2], count, length, mass, ids=ids))
         rows.append(ScheduleRow(u"{} — итого".format(part), u"", 0, sum(acc[k][0] for k in acc if k[0] == part),
-                                sum(acc[k][1] for k in acc if k[0] == part), part_mass, True))
+                                sum(acc[k][1] for k in acc if k[0] == part), part_mass, True,
+                                ids=[i for k in acc if k[0] == part for i in acc[k][2]]))
         total += part_mass
     return rows, total
 

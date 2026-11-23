@@ -40,6 +40,7 @@ import traceback
 import System
 from System.Collections.Generic import List
 from System.Diagnostics import Process
+import bimtools_window
 from System.Windows import WindowState, Visibility
 from System.Windows.Controls import Button
 from System.Windows.Interop import WindowInteropHelper
@@ -1138,6 +1139,60 @@ XAML_RESOURCES = u"""
             </Style.Triggers>
         </Style>
 
+        <!-- Всплывающие подсказки: светлая карточка с оранжевой рамкой, перенос длинного текста -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#FFFFFBF7"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="BorderBrush" Value="#99FF7A1A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="MaxWidth" Value="420"/>
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Галочки в стиле окна: скруглённый квадрат, оранжевая заливка при выборе, черта — «выбрано частично» -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border Name="box" Width="18" Height="18" CornerRadius="5" Background="#E6FFFFFF" BorderBrush="#80FF7A1A" BorderThickness="1" VerticalAlignment="Center">
+                                <Grid>
+                                    <Path Name="mark" Data="M3.5,9 L7.5,13 L14.5,5.5" Stroke="White" StrokeThickness="2.2" Visibility="Hidden"/>
+                                    <Rectangle Name="part" Width="8" Height="2.4" Fill="White" Visibility="Hidden"/>
+                                </Grid>
+                            </Border>
+                            <ContentPresenter Name="text" VerticalAlignment="Center" Margin="8,0,0,0" RecognizesAccessKey="True"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Content" Value="{x:Null}"><Setter TargetName="text" Property="Margin" Value="0"/></Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FFFF7A1A"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FF2B2118"/></Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="mark" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="{x:Null}">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="part" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="GlassCard" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource GlassFill}"/>
             <Setter Property="BorderBrush" Value="#80FFFFFF"/>
@@ -1159,6 +1214,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.9"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.75"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF2B2118"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1180,6 +1237,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFFFFF"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFEBD9"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FFFF7A1A"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1490,8 +1549,8 @@ __RESOURCES__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="СХЕМЫ СС" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navGenerate" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Генерация схемы"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры проекта"/>
+                                <RadioButton Name="navGenerate" ToolTip="Выбор системы, правила построения и генерация схемы на чертёжном виде" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Генерация схемы"/>
+                                <RadioButton Name="navParams" ToolTip="Проверка и привязка параметров CEC_ к категориям оборудования из ФОП" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры проекта"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -1529,8 +1588,8 @@ __RESOURCES__
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
-                                                <ComboBox Name="cbSystems" Style="{StaticResource PillComboBox}" Tag="Система:"/>
-                                                <Button Name="btnRefreshSystems" Grid.Column="1" Content="Обновить список" Style="{StaticResource GlassButton}" Margin="10,0,0,0"/>
+                                                <ComboBox Name="cbSystems" ToolTip="Система из параметра CEC_Имя_Системы — схема строится по её элементам" Style="{StaticResource PillComboBox}" Tag="Система:"/>
+                                                <Button Name="btnRefreshSystems" ToolTip="Заново прочитать системы из модели (после правки параметров CEC_)" Grid.Column="1" Content="Обновить список" Style="{StaticResource GlassButton}" Margin="10,0,0,0"/>
                                             </Grid>
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
@@ -1538,15 +1597,15 @@ __RESOURCES__
                                                     <ColumnDefinition Width="*"/>
                                                 </Grid.ColumnDefinitions>
                                                 <TextBlock Text="Имя чертёжного вида:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="4,0,12,0"/>
-                                                <TextBox Name="txtViewName" Grid.Column="1" Style="{StaticResource PillTextBox}" Text="Схема СС - Авто"/>
+                                                <TextBox Name="txtViewName" ToolTip="Имя чертёжного вида. Если вид уже есть, он будет перерисован (с подтверждением)" Grid.Column="1" Style="{StaticResource PillTextBox}" Text="Схема СС - Авто"/>
                                             </Grid>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{StaticResource GlassCard}" Padding="18,14" Margin="0,0,0,12">
                                         <StackPanel>
                                             <TextBlock Text="Правила построения" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
-                                            <ComboBox Name="cbOrder" Style="{StaticResource PillComboBox}" Tag="Порядок устройств в шлейфе:" Margin="0,0,0,8"/>
-                                            <ComboBox Name="cbLevelLabel" Style="{StaticResource PillComboBox}" Tag="Подпись этажа:"/>
+                                            <ComboBox Name="cbOrder" ToolTip="Как упорядочить устройства в шлейфе" Style="{StaticResource PillComboBox}" Tag="Порядок устройств в шлейфе:" Margin="0,0,0,8"/>
+                                            <ComboBox Name="cbLevelLabel" ToolTip="Что писать у этажа на схеме" Style="{StaticResource PillComboBox}" Tag="Подпись этажа:"/>
                                             <TextBlock FontSize="12" Foreground="#FF8C7A6B" TextWrapping="Wrap" Margin="4,10,0,0"
                                                        Text="«По удалённости от щита» — от щита к ближайшему устройству, затем к ближайшему из оставшихся (этажи по удалённости от этажа щита). «По маркам» — если марки уже пронумерованы в порядке подключения (L1.1, L1.2…)."/>
                                         </StackPanel>
@@ -1567,8 +1626,8 @@ __RESOURCES__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbGenerateStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnDemo" Grid.Column="1" Content="Демо-схема" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                                <Button Name="btnGenerate" Grid.Column="2" Content="Сгенерировать схему" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnDemo" ToolTip="Построить схему на синтетических данных — проверить раскладку без элементов в модели" Grid.Column="1" Content="Демо-схема" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                                <Button Name="btnGenerate" ToolTip="Нарисовать схему выбранной системы на чертёжном виде" Grid.Column="2" Content="Сгенерировать схему" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -1594,7 +1653,7 @@ __RESOURCES__
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Text="Файл общих параметров (ФОП):" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                    <TextBox Name="txtFop" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
+                                    <TextBox Name="txtFop" ToolTip="Файл общих параметров, из которого берутся определения CEC_" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
                                     <Button Name="btnBrowseFop" Grid.Column="2" Style="{StaticResource IconButton}" Content="..." Margin="8,0,0,0" ToolTip="Выбрать ФОП"/>
                                 </Grid>
                             </Border>
@@ -1633,7 +1692,7 @@ __RESOURCES__
                                                             </Grid.ColumnDefinitions>
                                                             <StackPanel VerticalAlignment="Center">
                                                                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                                                                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#FF8C7A6B" TextTrimming="CharacterEllipsis"/>
+                                                                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#FF8C7A6B" TextTrimming="CharacterEllipsis" ToolTip="{Binding Description}"/>
                                                             </StackPanel>
                                                             <TextBlock Grid.Column="1" Text="{Binding DataText}" FontSize="13" VerticalAlignment="Center"/>
                                                             <TextBlock Grid.Column="2" Text="{Binding BindText}" FontSize="13" VerticalAlignment="Center"/>
@@ -1656,8 +1715,8 @@ __RESOURCES__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbParamsStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnCheckParams" Grid.Column="1" Content="Проверить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                                <Button Name="btnPrepare" Grid.Column="2" Content="Подготовить проект" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnCheckParams" ToolTip="Проверить, какие параметры CEC_ есть в ФОП и привязаны в проекте" Grid.Column="1" Content="Проверить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                                <Button Name="btnPrepare" ToolTip="Привязать недостающие параметры CEC_ (сначала список действий и подтверждение)" Grid.Column="2" Content="Подготовить проект" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
                     </Grid>
@@ -2205,6 +2264,7 @@ class SchemaApp(object):
         global dialog_owner
         self.window = XamlReader.Parse(XAML_UI.replace('__RESOURCES__', XAML_RESOURCES))
         dialog_owner = self.window
+        bimtools_window.setup(self.window)       # по размеру экрана, прежние размер и положение
         for name in CONTROL_NAMES:
             setattr(self, name, self.window.FindName(name))
         self.actions = RevitActions()
@@ -2410,7 +2470,7 @@ class SchemaApp(object):
         self.actions.request(job)
 
     def show(self):
-        WindowInteropHelper(self.window).Owner = Process.GetCurrentProcess().MainWindowHandle
+        WindowInteropHelper(self.window).Owner = bimtools_window.revit_window_handle()
         self.window.Show()
         self.actions.request(self.load_systems)
 

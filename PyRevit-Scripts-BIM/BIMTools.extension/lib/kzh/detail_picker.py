@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Установка деталей из конфигуратора щелчками по стержням сечения — общее для окон «Колонны» и «Балки».
 
-Окно добавляет в SECTION_FIELDS карточку CARD (ключ "details"), создаёт DetailPicker и после каждой
+Окно добавляет в SECTION_FIELDS карточку card(...) (ключ "details"), закрепляет её (editor.pinned),
+создаёт DetailPicker и после каждой
 перерисовки сечения вызывает show(sketch, bars, items): bars — стержни сечения [(x, y, Ø)] в координатах
 рисунка, items — список поставленных деталей участка ({"name", "bars": [номера]}), который хранится в настройках.
 """
@@ -10,20 +11,25 @@ clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 clr.AddReference('WindowsBase')
 
-from System.Windows import Thickness, VerticalAlignment
+from System.Windows import FontWeights, Thickness, VerticalAlignment
 from System.Windows.Controls import Button, Dock, DockPanel, TextBlock
 
 from kzh import details as kdet
 from kzh import drawing as kd
 from kzh.ui import Option, selected_value, show_message
 
-CARD = ("details", "R", {
-    "title": u"Детали в сечении",
-    "note": u"Щёлкните по стержням на рисунке, выберите деталь из библиотеки «Детали» и нажмите «Поставить». "
-            u"Хомут и ромб охватывают выбранные стержни, шпилька — между двумя.",
-    "rows": [[("combo", "det_pick", [], 240)],
-             [("button", "det_add", u"Поставить по выбранным"), ("button", "det_clear", u"Снять выбор")],
-             [("panel", "det_list")], [("hint", "det")]]})
+def card(tie_options):
+    """Карточка «Детали в сечении» вместе с автоматическими шпильками (бывшая карточка «Шпильки»):
+    сначала режим авто-шпилек по СП 63 и их Ø, затем ручная установка деталей и список поставленных.
+    tie_options — [Option] режимов шпилек окна (ключ поля "ties", Ø — "dt", подсказка — "ties")."""
+    return ("details", "R", {
+        "title": u"Детали в сечении",
+        "note": u"1) Шпильки по СП 63 ставятся сами. 2) Чтобы добавить деталь: щёлкните по стержням на рисунке, "
+                u"выберите деталь и нажмите «+ Добавить». Хомут и ромб охватывают стержни, шпилька — между двумя.",
+        "rows": [[u"Шпильки", ("combo", "ties", tie_options, 180), u"Ø", ("diam", "dt")], [("hint", "ties")],
+                 [u"Деталь", ("combo", "det_pick", [], 210)],
+                 [("button", "det_add", u"+ Добавить по выбранным"), ("button", "det_clear", u"Снять выбор")],
+                 [("hint", "det")], [("panel", "det_list")]]})
 
 
 class DetailPicker(object):
@@ -38,6 +44,7 @@ class DetailPicker(object):
         self.get_items = get_items
         self.refresh = refresh
         self.selected = []
+        self.hilite = None          # номер детали, выделенной в списке
         self.sketch = None
         self.bars = []
         placeable = [d for d in library if d["kind"] in kdet.PLACEABLE]
@@ -52,13 +59,15 @@ class DetailPicker(object):
     def reset(self):
         """Смена группы или участка — выбор стержней сбрасывается."""
         self.selected = []
+        self.hilite = None
 
     def draw(self, sk, bars, items):
         """Рисует поставленные детали и выделенные стержни. Возвращает точку выноски карточки (px) или None."""
         self.sketch, self.bars = sk, bars
         placed, notes = kdet.placed(items, bars, self.library)
-        for det, pts, closed, _ in placed:
-            sk.poly(pts, kd.STIRRUP, 2.0)
+        for det, pts, closed, k in placed:
+            # Выбранная в списке деталь — толще остальных (щелчок по строке списка)
+            sk.poly(pts, kd.STIRRUP, 4.0 if k == self.hilite else 2.0)
         for i in self.selected:
             if i < len(bars):
                 sk.ring(bars[i][0], bars[i][1], max(bars[i][2] / 2.0 * sk.k + 5.0, 8.0))
@@ -84,11 +93,21 @@ class DetailPicker(object):
             DockPanel.SetDock(btn, Dock.Right)
             row.Children.Add(btn)
             tb = TextBlock()
-            tb.Text = u"{} • стержней {}".format(kdet.title(det), len(items[k]["bars"]))
+            tb.Text = u"{}. {} • стержней {}".format(k + 1, kdet.title(det), len(items[k]["bars"]))
             tb.FontSize = 11.5
             tb.VerticalAlignment = VerticalAlignment.Center
+            if k == self.hilite:
+                tb.FontWeight = FontWeights.Bold
+            tb.ToolTip = u"Щёлкните, чтобы показать деталь на рисунке"
+            tb.MouseLeftButtonDown += (lambda idx: (lambda s, e: self.on_hilite(idx)))(k)
             row.Children.Add(tb)
             panel.Children.Add(row)
+        if not placed:
+            empty = TextBlock()
+            empty.Text = u"Деталей пока нет"
+            empty.FontSize = 11.0
+            empty.Foreground = kd.brush("#FF8C7A6B")
+            panel.Children.Add(empty)
         hint = u"Выбрано стержней: {}".format(len(self.selected)) if self.selected else u"Щёлкните по стержням на рисунке"
         if notes:
             hint += u" • " + u"; ".join(notes)
@@ -129,8 +148,13 @@ class DetailPicker(object):
         self.selected = []
         self.refresh()
 
+    def on_hilite(self, index):
+        self.hilite = None if self.hilite == index else index
+        self.refresh()
+
     def on_remove(self, index):
         items = self.get_items()
         if 0 <= index < len(items):
             del items[index]
+        self.hilite = None
         self.refresh()

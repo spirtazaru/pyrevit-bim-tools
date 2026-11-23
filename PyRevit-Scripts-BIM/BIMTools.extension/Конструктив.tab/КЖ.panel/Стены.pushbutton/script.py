@@ -31,6 +31,7 @@ from pyrevit import DB
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from Autodesk.Revit.Exceptions import OperationCanceledException
 from System.Windows import Visibility
+from System.Collections.Generic import List
 
 import sys
 # pyRevit держит модули lib в памяти движка между запусками кнопок: без сброса после обновления
@@ -41,7 +42,9 @@ for _name in [n for n in sys.modules if n == "kzh" or n.startswith("kzh.")]:
 from kzh import element_name, ui
 from kzh import runner
 from kzh import drawing as kd
+from kzh import details as kdet
 from kzh import planar as kp
+from kzh import model_rebar
 from kzh import norms, settings
 from kzh import rebar as kr
 from kzh.geometry import mm
@@ -73,7 +76,7 @@ GENERAL_DEFAULTS = {"steel": u"А500", "st_steel": u"А240", "concrete": u"В25"
 # dp/sp — шпильки, le/ne/de/dse/se — краевая зона: длина, стержней у грани, их Ø, хомут Ø и шаг.
 MESH_DEFAULTS = {"kind": None, "dv_e": 12, "sv_e": 200.0, "dh_e": 10, "sh_e": 200.0,
                  "dv_i": 12, "sv_i": 200.0, "dh_i": 10, "sh_i": 200.0,
-                 "c_e": None, "c_i": None, "cond_e": "indoor_normal", "cond_i": "indoor_normal", "hor_out": True,
+                 "c_e": None, "c_i": None, "cond_e": "indoor_normal", "cond_i": "indoor_normal", "hor_out_e": True, "hor_out_i": True,
                  "du": None, "d_add": None, "n_add": None, "pins": PINS_CHESS, "dp": 6, "sp": None,
                  "le": None, "ne": 3, "de": 16, "dse": 8, "se": None,
                  "top": TOP_AUTO, "bottom": BOT_JOINT, "top_u": False, "small": None}
@@ -227,7 +230,11 @@ class Calc(object):
         for f in ("e", "i"):
             src = f if f in faces else "e"
             d_out = max(so["dh_" + src], so["dv_" + src])
-            auto = norms.ceil_to(norms.cover_main(so["cond_" + src], d_out), 5.0)
+            auto = norms.cover_main(so["cond_" + src], d_out)
+            if self.two and self.kind != "pier" and so["pins"] != PINS_NONE:
+                # Шпилька огибает наружный стержень сетки: её слой — на Ø шпильки меньше (СП 63, п. 10.3.2)
+                auto = max(auto, norms.cover_constructive(so["cond_" + src], so["dp"]) + so["dp"])
+            auto = norms.ceil_to(auto, 5.0)
             self.c[f] = so["c_" + src] or auto
             setattr(self, "c_auto_" + f, auto)
         self.du = so["du"] or so["dh_e"]
@@ -241,7 +248,7 @@ class Calc(object):
         if self.two:
             for f, face in (("e", "hi"), ("i", "lo")):
                 dh, dv, c = so["dh_" + f], so["dv_" + f], self.c[f]
-                if so["hor_out"]:
+                if so["hor_out_" + f]:          # у каждой сетки свой порядок слоёв
                     off_h, off_v = c + dh / 2.0, c + dh + dv / 2.0
                 else:
                     off_v, off_h = c + dv / 2.0, c + dv + dh / 2.0
@@ -261,6 +268,9 @@ class Calc(object):
                 w.append(u"шаг горизонтальных {:.0f} мм больше {:.0f} мм".format(float(so["sh_" + f]), float(s_h)))
             if self.c[f] < norms.cover_main(so["cond_" + f], max(so["dh_" + f], so["dv_" + f])):
                 w.append(u"защитный слой {:.0f} мм меньше нормы".format(float(self.c[f])))
+            elif self.c[f] < getattr(self, "c_auto_" + f) and self.c[f] - so["dp"] < norms.cover_constructive(so["cond_" + f], so["dp"])                     and self.two and self.kind != "pier" and so["pins"] != PINS_NONE:
+                w.append(u"защитный слой шпилек {:.0f} мм меньше {:.0f} мм".format(
+                    float(self.c[f] - so["dp"]), float(norms.cover_constructive(so["cond_" + f], so["dp"]))))
         mu_min = norms.wall_rule("mu_min")["value"]
         mu_v, mu_h = self.mu()
         if mu_v < mu_min:
@@ -535,9 +545,10 @@ def _pins(calc, item, plan):
         cols_v.setdefault(round(pos, 1), []).append((a, b))
     inside = lambda segs, s: any(a + 20 <= s <= b - 20 for a, b in segs)
     dp = calc.dp
-    outer_e = lh_e if so["hor_out"] else lv_e
-    outer_i = lh_i if so["hor_out"] else lv_i
+    outer_e = lh_e if so["hor_out_e"] else lv_e
+    outer_i = lh_i if so["hor_out_i"] else lv_i
     groups = []
+    y_mid = (ps_h[0] + ps_h[-1]) / 2.0
     for r, i in enumerate(range(0, len(ps_h), k_row)):
         y = ps_h[i]
         offset = (m_col // 2) if (r % 2 == 1 and m_col >= 2) else 0
@@ -549,7 +560,10 @@ def _pins(calc, item, plan):
             xp, yp = x + (lv_e.d + dp) / 2.0, y + (lh_e.d + dp) / 2.0
             n_hi = outer_e.n(p, yp) + outer_e.d / 2.0 + dp / 2.0
             n_lo = outer_i.n(p, yp) - outer_i.d / 2.0 - dp / 2.0
-            row.append(kp.Bar([(xp, yp, n_lo), (xp, yp, n_hi)], len(row), (1.0, 0.0, 0.0)))
+            ends = [(xp, yp, n_lo), (xp, yp, n_hi)]
+            if y > y_mid:
+                ends.reverse()          # в верхней половине стены крюки шпилек — вниз, чтобы не вышли из бетона сверху
+            row.append(kp.Bar(ends, len(row), (1.0, 0.0, 0.0)))
         groups.append(row)
         plan.add("pin", row)
     plan.pin_groups = groups
@@ -659,7 +673,7 @@ def reinforce(groups, ho, skipped):
                 continue
             plans.append({"host": item.wall, "title": item.title, "specs": specs,
                           "summary": plan_summary(item, plan, calc), "notes": plan.notes})
-    hooks = {"stirrup": runner.find_hook(doc, ho["hook"]), "pin": runner.find_hook(doc, ho["tie_hook"])}
+    hooks = runner.hooks_from_details(doc, kdet.load_library(), ho["hook"], ho["tie_hook"])
     runner.run(doc, plans, skipped, warnings, ho["steel"], ho["st_steel"], hooks, PART_NAME, WHAT)
 
 
@@ -864,9 +878,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • СТЕНЫ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navSection" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
-                                <RadioButton Name="navLength" GroupName="nav" Style="{StaticResource NavItem}" Content="Фасад"/>
-                                <RadioButton Name="navParams" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navSection" ToolTip="Горизонтальный разрез стены: сетки, порядок слоёв, П-стержни, шпильки, краевые зоны" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Сечение"/>
+                                <RadioButton Name="navLength" ToolTip="Фасад стены: низ, верх, проёмы и их усиление" GroupName="nav" Style="{StaticResource NavItem}" Content="Фасад"/>
+                                <RadioButton Name="navParams" ToolTip="Материалы, длина стержней и стыки, хомут и шпилька из «Деталей»" GroupName="nav" Style="{StaticResource NavItem}" Content="Параметры"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -900,10 +914,10 @@ __TITLEBAR__
                                 </Grid>
                                 <WrapPanel Margin="0,10,0,0">
                                     <TextBlock Text="Тип армирования:" Style="{StaticResource Inline}" Margin="0,0,10,0"/>
-                                    <RadioButton Name="rbDouble" GroupName="kind" Style="{StaticResource ModePill}" Content="Две сетки"/>
-                                    <RadioButton Name="rbSingle" GroupName="kind" Style="{StaticResource ModePill}" Content="Одна сетка"/>
-                                    <RadioButton Name="rbPier" GroupName="kind" Style="{StaticResource ModePill}" Content="Диафрагма с краевыми зонами"/>
-                                    <RadioButton Name="rbRetaining" GroupName="kind" Style="{StaticResource ModePill}" Content="Подпорная / подвальная"/>
+                                    <RadioButton Name="rbDouble" ToolTip="Две сетки у граней стены, связанные шпильками и П-стержнями" GroupName="kind" Style="{StaticResource ModePill}" Content="Две сетки"/>
+                                    <RadioButton Name="rbSingle" ToolTip="Одна сетка по оси стены (тонкие стены)" GroupName="kind" Style="{StaticResource ModePill}" Content="Одна сетка"/>
+                                    <RadioButton Name="rbPier" ToolTip="Диафрагма: краевые зоны у торцов и проёмов со стержнями в хомутах" GroupName="kind" Style="{StaticResource ModePill}" Content="Диафрагма с краевыми зонами"/>
+                                    <RadioButton Name="rbRetaining" ToolTip="Подпорная или подвальная стена: две сетки, у наружной — защитный слой для грунта" GroupName="kind" Style="{StaticResource ModePill}" Content="Подпорная / подвальная"/>
                                 </WrapPanel>
                             </StackPanel>
                         </Border>
@@ -973,6 +987,7 @@ __TITLEBAR__
                                             <TextBox Name="tbMaxLen" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
                                         </Grid>
                                         <CheckBox Name="chkStagger" Style="{StaticResource PillCheck}" Content="Стыки вразбежку (через стержень)" Margin="0,0,0,8"/>
+                                        <TextBlock Style="{StaticResource Hint}" Text="Хомут и шпилька — детали из библиотеки «Детали»: крюки берутся из выбранной детали." Margin="0,0,0,6"/>
                                         <ComboBox Name="cbHook" Style="{StaticResource PillComboBox}" Tag="Хомуты зон:" Margin="0,0,0,6"/>
                                         <ComboBox Name="cbTieHook" Style="{StaticResource PillComboBox}" Tag="Шпильки:"/>
                                     </StackPanel>
@@ -987,7 +1002,7 @@ __TITLEBAR__
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Name="tbInfo" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
-                            <Button Name="btnRun" Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnRun" ToolTip="Создать арматуру по настройкам окна. Сначала — список элементов и подтверждение; старая арматура удаляется только после отдельного подтверждения." Grid.Column="1" Content="Армировать" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>
@@ -1026,9 +1041,12 @@ MESH_NOTE_SINGLE = (u"Одна сетка по середине толщины �
 PLAN_FIELDS = [
     ("mesh_e", "L", _mesh_card("e", u"Наружная сетка", MESH_NOTE_E)),
     ("mesh_i", "L", _mesh_card("i", u"Внутренняя сетка", u"У внутренней грани стены. Поля — как у наружной сетки.")),
-    ("order", "L", {"title": u"Порядок слоёв", "note": u"Какие стержни сетки ближе к грани стены (снаружи).",
-                    "rows": [[("combo", "hor_out", [Option(u"горизонтальные снаружи", True),
-                                                    Option(u"вертикальные снаружи", False)], 240)]]}),
+    ("order", "L", {"title": u"Порядок слоёв",
+                    "note": u"Какие стержни сетки ближе к грани стены — у каждой сетки свой выбор.",
+                    "rows": [[u"Наружная", ("combo", "hor_out_e", [Option(u"горизонтальные снаружи", True),
+                                                                   Option(u"вертикальные снаружи", False)], 200)],
+                             [u"Внутренняя", ("combo", "hor_out_i", [Option(u"горизонтальные снаружи", True),
+                                                                     Option(u"вертикальные снаружи", False)], 200)]]}),
     ("ubar", "R", {"title": u"П-стержни у торцов и проёмов",
                    "note": u"Охватывают обе сетки у свободных торцов стены и по краям проёмов. Шаг — как у "
                            u"горизонтальных (вертикальных) стержней, ножки — на длину анкеровки.",
@@ -1043,6 +1061,7 @@ PLAN_FIELDS = [
                    "rows": [[u"Длина зоны", ("num", "le", 50), u"мм"], [("hint", "le")],
                             [u"Стержней у каждой грани", ("num", "ne", 34), u"шт. Ø", ("diam", "de")],
                             [u"Хомуты Ø", ("diam", "dse"), u"шаг", ("num", "se", 50), u"мм"], [("hint", "se")]]}),
+    model_rebar.PLANAR_CARD,
 ]
 # Раздел «Фасад»: слева — низ и проёмы, справа — верх
 FACADE_FIELDS = [
@@ -1076,7 +1095,7 @@ def visible_plan(kind):
         keys += ["ubar", "pins"]
     if kind == "pier":
         keys += ["edge"]
-    return keys
+    return keys + ["model"]
 
 
 def visible_facade(kind):
@@ -1104,6 +1123,10 @@ class WallsWindow(ui.KzhWindow):
 
         self.editor = SectionEditor(self.window, self.cnvSection, self.cnvFields, self.refresh)
         self.editor.build(PLAN_FIELDS)
+        self.editor.pinned = ["model"]
+        self.model_ids, self.model_item = [], None
+        self.editor.buttons["mdl_show"].Click += self.on_model_show
+        self.editor.buttons["mdl_select"].Click += self.on_model_select
         self.feditor = SectionEditor(self.window, self.cnvElev, self.cnvElevFields, self.refresh)
         self.feditor.build(FACADE_FIELDS)
         for ed in (self.editor, self.feditor):
@@ -1117,9 +1140,12 @@ class WallsWindow(ui.KzhWindow):
         self.cbSteel.ItemsSource = steel()
         self.cbStSteel.ItemsSource = steel()
         self.cbConcrete.ItemsSource = [Option(c, c) for c in norms.concrete_classes()]
-        hook_names = [element_name(h) for h in kr.hook_types(doc)]
-        self.cbHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
-        self.cbTieHook.ItemsSource = [Option(u"Без отгибов", u"")] + [Option(n, n) for n in hook_names]
+        # Хомут и шпилька — детали библиотеки «Детали» (крюки задаются в детали)
+        self.lib = kdet.load_library()
+        self.cbHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "stirrup")]
+        self.cbTieHook.ItemsSource = [Option(u"Без крюков", u"")] + [
+            Option(d["name"], d["name"]) for d in kdet.of_kind(self.lib, "pin")]
 
         saved = settings.load(SETTINGS_SECTION)
         self.saved = saved
@@ -1147,13 +1173,13 @@ class WallsWindow(ui.KzhWindow):
     def load_general(self, saved):
         o = dict(GENERAL_DEFAULTS)
         o.update(dict((k, v) for k, v in saved.items() if k in o))
-        default_hook = kr.default_stirrup_hook(doc)
-        default_hook = element_name(default_hook) if default_hook is not None else u""
+        # Пусто — без крюков; не деталь библиотеки (старые настройки — имя типа отгиба) — деталь по умолчанию
+        pick = lambda value, kind: value if value == u"" or kdet.find(self.lib, value) else kdet.default_name(self.lib, kind)
         ui.select_option(self.cbSteel, o["steel"])
         ui.select_option(self.cbStSteel, o["st_steel"])
         ui.select_option(self.cbConcrete, o["concrete"])
-        ui.select_option(self.cbHook, default_hook if o["hook"] is None else o["hook"])
-        ui.select_option(self.cbTieHook, default_hook if o["tie_hook"] is None else o["tie_hook"])
+        ui.select_option(self.cbHook, pick(o["hook"], "stirrup"))
+        ui.select_option(self.cbTieHook, pick(o["tie_hook"], "pin"))
         self.chkUEnds.IsChecked = bool(o["u_ends"])
         self.chkUOpen.IsChecked = bool(o["u_open"])
         self.chkStagger.IsChecked = bool(o["stagger"])
@@ -1184,7 +1210,10 @@ class WallsWindow(ui.KzhWindow):
         """Параметры группы для типа армирования: по умолчанию, затем сохранённые для этого типа."""
         o = dict(MESH_DEFAULTS)
         o.update(KIND_DEFAULTS[kind])
-        o.update(dict((k, v) for k, v in (self.saved.get("mesh_" + kind) or {}).items() if k in o))
+        saved = self.saved.get("mesh_" + kind) or {}
+        o.update(dict((k, v) for k, v in saved.items() if k in o))
+        if "hor_out" in saved and "hor_out_e" not in saved:      # старые настройки: один порядок на обе сетки
+            o["hor_out_e"] = o["hor_out_i"] = bool(saved["hor_out"])
         o["kind"] = kind
         return o
 
@@ -1241,6 +1270,29 @@ class WallsWindow(ui.KzhWindow):
         self.load_opts(g)
         self.refresh()
 
+    # ----------------------------------------------------------
+    # СВЕРКА С МОДЕЛЬЮ
+    # ----------------------------------------------------------
+    def on_model_show(self, sender, args):
+        """Сводка арматуры, которая уже стоит у выбранного элемента (только просмотр)."""
+        g = self.current
+        if g is None:
+            return
+        item = self.cbItem.SelectedItem or g.items[0]
+        lines, self.model_ids = model_rebar.layers(doc, item.wall, False)
+        self.model_item = item
+        self.editor.set_hint("mdl", u"{}:\n{}".format(item.title, u"\n".join(lines)) if lines
+                             else u"{}: в модели арматуры нет".format(item.title))
+        self.refresh()
+
+    def on_model_select(self, sender, args):
+        if not getattr(self, "model_ids", None):
+            show_message(u"Сначала нажмите «Показать арматуру модели».")
+            return
+        uidoc.Selection.SetElementIds(List[DB.ElementId](self.model_ids))
+        show_message(u"Выделено наборов арматуры: {}. Выделение будет видно в модели после закрытия окна.".format(
+            len(self.model_ids)))
+
     def refresh(self):
         g = self.current
         if self._loading or g is None:
@@ -1277,6 +1329,10 @@ class WallsWindow(ui.KzhWindow):
             self.feditor.set_hint("n_add", u"" if so["n_add"] else u"пусто — по норме (≥ половины прерванных, ≥ 2)")
             self.feditor.set_hint("small", u"" if so["small"] is not None else u"пусто — {:.0f} (практика)".format(float(calc.small)))
             targets = draw_plan(self.cnvSection, calc, item, plan, self.editor.pad(top=40, bottom=60))
+            if self.model_item is not item:          # сводка — только для того элемента, по которому её строили
+                self.editor.set_hint("mdl", u"")
+                self.model_ids, self.model_item = [], None
+            targets["model"] = model_rebar.TARGET
             self.editor.place(targets)
             ftargets = draw_facade(self.cnvElev, calc, item, plan, self.feditor.pad(top=40, bottom=70))
             self.feditor.place(ftargets)

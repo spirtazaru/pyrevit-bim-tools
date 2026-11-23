@@ -83,9 +83,9 @@ __TITLEBAR__
                             <ListBox Name="lbLibrary" Grid.Row="1" Background="Transparent" BorderThickness="0"
                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                             <WrapPanel Grid.Row="2" Margin="0,10,0,0">
-                                <Button Name="btnNew" Content="+ Новая" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
-                                <Button Name="btnCopy" Content="Копия" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
-                                <Button Name="btnDelete" Content="Удалить" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
+                                <Button Name="btnNew" ToolTip="Новая деталь выбранного типа с размерами по умолчанию" Content="+ Новая" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
+                                <Button Name="btnCopy" ToolTip="Копия выбранной детали — для похожей с другими размерами" Content="Копия" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
+                                <Button Name="btnDelete" ToolTip="Удалить деталь из библиотеки (с подтверждением). В проекте ничего не меняется" Content="Удалить" Style="{StaticResource GlassButton}" Margin="0,0,6,6"/>
                             </WrapPanel>
                             <TextBlock Grid.Row="3" FontSize="11" Foreground="#FF8C7A6B" TextWrapping="Wrap"
                                        Text="Библиотека хранится в плагине, а не в проекте: она доступна в любом проекте."/>
@@ -169,7 +169,7 @@ __TITLEBAR__
                                            Text="Пусто — по типу крюка Revit. Длина крюка в Revit задаётся у типа стержня: она применится ко всем стержням этого диаметра с таким крюком."/>
                                 <TextBlock Name="tbMass" FontWeight="SemiBold"/>
                             </StackPanel>
-                            <Button Name="btnSave" Grid.Row="2" Content="Сохранить деталь" Style="{StaticResource PrimaryButton}"/>
+                            <Button Name="btnSave" ToolTip="Сохранить деталь в библиотеку — она сразу доступна в окнах армирования" Grid.Row="2" Content="Сохранить деталь" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Border>
                 </Grid>

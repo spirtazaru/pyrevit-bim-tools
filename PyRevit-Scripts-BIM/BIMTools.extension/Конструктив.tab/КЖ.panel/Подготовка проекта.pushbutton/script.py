@@ -121,9 +121,9 @@ __TITLEBAR__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="КЖ • ПОДГОТОВКА" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navParams" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Параметры"/>
-                                <RadioButton Name="navShapes" GroupName="nav" Style="{StaticResource NavItem}" Content="Формы стержней"/>
-                                <RadioButton Name="navNorms" GroupName="nav" Style="{StaticResource NavItem}" Content="Нормы"/>
+                                <RadioButton Name="navParams" ToolTip="Общие параметры АрмМарка, АрмЧисло, АрмКонструкция: проверка и привязка к арматуре" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Параметры"/>
+                                <RadioButton Name="navShapes" ToolTip="Какая форма стержня Revit используется для каждой роли (прямой, П, хомут…)" GroupName="nav" Style="{StaticResource NavItem}" Content="Формы стержней"/>
+                                <RadioButton Name="navNorms" ToolTip="Значения норм СП 63, по которым считают окна армирования" GroupName="nav" Style="{StaticResource NavItem}" Content="Нормы"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -220,8 +220,8 @@ __TITLEBAR__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbParamsStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnCheckParams" Grid.Column="1" Content="Проверить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                                <Button Name="btnPrepare" Grid.Column="2" Content="Подготовить проект" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnCheckParams" ToolTip="Проверить, какие параметры уже есть и привязаны" Grid.Column="1" Content="Проверить" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                                <Button Name="btnPrepare" ToolTip="Добавить недостающие параметры из ФОП в проект и привязать их к арматуре" Grid.Column="2" Content="Подготовить проект" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -267,7 +267,7 @@ __TITLEBAR__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbShapesStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnSaveShapes" Grid.Column="1" Content="Сохранить таблицу ролей" Style="{StaticResource PrimaryButton}"/>
+                                <Button Name="btnSaveShapes" ToolTip="Сохранить таблицу ролей форм — она общая для всех проектов" Grid.Column="1" Content="Сохранить таблицу ролей" Style="{StaticResource PrimaryButton}"/>
                             </Grid>
                         </Grid>
 
@@ -314,7 +314,7 @@ __TITLEBAR__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbNormsStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnOpenNorms" Grid.Column="1" Content="Открыть norms.json" Style="{StaticResource GlassButton}"/>
+                                <Button Name="btnOpenNorms" ToolTip="Открыть файл норм в редакторе" Grid.Column="1" Content="Открыть norms.json" Style="{StaticResource GlassButton}"/>
                             </Grid>
                         </Grid>
                     </Grid>

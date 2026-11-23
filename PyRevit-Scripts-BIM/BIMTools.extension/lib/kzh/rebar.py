@@ -248,6 +248,7 @@ def bars_in_set(rb):
 # ПЛАН АРМИРОВАНИЯ ЭЛЕМЕНТА: СПИСОК СТЕРЖНЕЙ И НАБОРОВ
 # ----------------------------------------------------------
 TRANSVERSE_ROLES = ("stirrup", "pin", "link")    # link — поперечный стержень плоского каркаса
+ROLE_TITLES = {"stirrup": u"хомут", "pin": u"шпилька", "link": u"поперечный стержень"}
 
 
 class BarSpec(object):
@@ -314,36 +315,97 @@ def build_specs(doc, host, specs, types, steel_long, steel_trans, shapes, hooks)
     # на задуманное место; регенерация — одна на весь план, а не на каждый стержень
     if created:
         doc.Regenerate()
-        if sum(1 for rb in created if detach_from_rebar(rb)):
+        for rb, spec in zip(created, specs):
+            if not _bar_points(rb):
+                # Revit создал элемент, но не смог построить стержень такой формы (самопересечение, слишком
+                # короткие участки для гибов) — такой элемент дал бы ошибку при фиксации транзакции
+                raise Exception(u"Revit не построил стержень ⌀{} ({}): форма не выполнима — проверьте размеры "
+                                u"детали и выбранные стержни".format(spec.d, ROLE_TITLES.get(spec.role, spec.role)))
+        # Revit за один проход отпускает не все ручки (после смены одной заново цепляет другую к хомуту) —
+        # повторяем, пока есть что менять; со второго прохода — только участки и плоскость стержня
+        for attempt in range(3):
+            if not sum(1 for rb, spec in zip(created, specs) if detach_from_rebar(rb, spec, attempt > 0)):
+                break
             doc.Regenerate()
         for rb, spec in zip(created, specs):
             restore_planned(rb, spec)
     return created, quantity
 
 
+def settle(doc, pairs):
+    """Повторная посадка стержней после армирования всех элементов: стержни соседних (соединённых) элементов,
+    созданные позже, заново притягивают к себе уже поставленные. pairs — [(Rebar, BarSpec)]."""
+    if sum(1 for rb, spec in pairs if detach_from_rebar(rb, spec, True)):
+        doc.Regenerate()
+    if sum(restore_planned(rb, spec) for rb, spec in pairs):
+        doc.Regenerate()
+
+
 def _bar_points(rb):
     curves = rb.GetCenterlineCurves(False, True, True, ST.MultiplanarOption.IncludeOnlyPlanarCurves, 0)
+    if not curves:
+        return []
     return [curves[0].GetEndPoint(0)] + [c.GetEndPoint(1) for c in curves]
 
 
-def detach_from_rebar(rb):
+def detach_from_rebar(rb, spec=None, shape_only=False):
     """Ручки, которые Revit привязал к соседним стержням (шпилькам, хомутам), переводятся на грань основы:
-    иначе стержень прижимается к соседнему, а не стоит, где задуман. True — что-то изменено (нужна регенерация)."""
+    иначе стержень прижимается к соседнему (к гибу хомута в углу), а не стоит, где задуман. Грань выбирается
+    по смыслу ручки: для участка стержня — параллельная ему и перпендикулярная плоскости стержня, ближайшая;
+    для плоскости стержня — параллельная этой плоскости. True — что-то изменено (нужна регенерация)."""
     m = rb.GetRebarConstraintsManager()
     switched = False
+    pts = [spec.curves[0].GetEndPoint(0)] + [c.GetEndPoint(1) for c in spec.curves] if spec is not None else None
+    norm = spec.norm.Normalize() if spec is not None else None
     for h in m.GetAllHandles():
         c = m.GetCurrentConstraintOnHandle(h)
         if c is None or not c.IsToOtherRebar():
             continue
+        kind = h.GetHandleType()
+        if shape_only and kind not in (ST.RebarHandleType.Edge, ST.RebarHandleType.RebarPlane):
+            continue
+        u = mid = None
+        if pts is not None and kind == ST.RebarHandleType.Edge:
+            k = h.GetEdgeNumber()
+            if k + 1 < len(pts) and pts[k].DistanceTo(pts[k + 1]) > 1e-6:
+                u = (pts[k + 1] - pts[k]).Normalize()
+                mid = (pts[k] + pts[k + 1]) * 0.5
+        best = None
         for cand in m.GetConstraintCandidatesForHandle(h):
-            if cand.IsToHostFaceOrCover() and cand.NumberOfTargets == 1:
+            if not (cand.IsToHostFaceOrCover() and cand.NumberOfTargets == 1):
+                continue
+            score = 0.0
+            if pts is not None:
                 try:
-                    m.SetPreferredConstraintForHandle(h, cand)
-                    switched = True
-                    break
+                    tr = DB.Transform.Identity
+                    face = cand.GetTargetHostFaceAndTransform(0, tr)
                 except Exception:
-                    pass
+                    continue
+                if not isinstance(face, DB.PlanarFace):
+                    continue
+                n = tr.OfVector(face.FaceNormal).Normalize()
+                if u is not None:
+                    if abs(n.DotProduct(u)) > 0.1 or abs(n.DotProduct(norm)) > 0.1:
+                        continue
+                    score = abs((tr.OfPoint(face.Origin) - mid).DotProduct(n))
+                elif kind in (ST.RebarHandleType.RebarPlane, ST.RebarHandleType.OutOfPlaneExtent):
+                    if abs(n.DotProduct(norm)) < 0.9:
+                        continue
+                    score = abs((tr.OfPoint(face.Origin) - pts[0]).DotProduct(n))
+            if best is None or score < best[0] - 1e-9:
+                best = (score, cand)
+                if pts is None:
+                    break
+        if best is not None:
+            try:
+                m.SetPreferredConstraintForHandle(h, best[1])
+                switched = True
+            except Exception:
+                pass
     return switched
+
+
+DEBUG = []
 
 
 def restore_planned(rb, spec):
@@ -393,7 +455,8 @@ def restore_planned(rb, spec):
                 c.SetDistanceToTargetHostFace(c.GetDistanceToTargetHostFace() - delta)
             m.SetPreferredConstraintForHandle(h, c)
             fixed += 1
-        except Exception:
+        except Exception as _ex:
+            DEBUG.append((spec.role, spec.d, str(kind), mm(delta), mm(s_want), mm(s_got), c.IsToCover(), str(_ex)[:80]))
             pass        # отступ меньше допустимого Revit — стержень остаётся, как поставил Revit
     return fixed
 
@@ -458,20 +521,38 @@ def min_lateral_cover(host, specs):
     участку стержня. Замер — в середине каждого участка первого и последнего стержня набора, только внутри бетона
     основы. Концы стержней Revit не двигает, поэтому они не учитываются. None — замерить нечего."""
     from kzh.geometry import element_solids
-    faces = []
-    for solid in element_solids(host):
+    solids = element_solids(host)
+    faces, round_faces = [], []
+    for solid in solids:
         for f in solid.Faces:
             if isinstance(f, DB.PlanarFace):
                 faces.append(f)
+            elif isinstance(f, DB.CylindricalFace):
+                round_faces.append(f)
     opts = DB.SolidCurveIntersectionOptions()
-    solids = element_solids(host)
     best = None
     for spec in specs:
+        # Кольцевой хомут круглой колонны: слой — между окружностью стержня и соосной цилиндрической гранью
+        for c in spec.curves:
+            if not isinstance(c, DB.Arc):
+                continue
+            for f in round_faces:
+                axis = f.Axis.Normalize()
+                if abs(abs(axis.DotProduct(c.Normal)) - 1.0) > 1e-3:
+                    continue
+                v = c.Center - f.Origin
+                if (v - axis * v.DotProduct(axis)).GetLength() > ft(1):
+                    continue
+                cover = mm(f.get_Radius(0).GetLength() - c.Radius) - spec.d / 2.0
+                if cover >= -0.5 and (best is None or cover < best):
+                    best = cover
         shifts = [DB.XYZ.Zero]
         if spec.layout is not None and spec.layout[0] == "fixed":
             shifts.append(spec.norm.Normalize() * spec.layout[2])
         for shift in shifts:
             for c in spec.curves:
+                if isinstance(c, DB.Arc):
+                    continue
                 a, b = c.GetEndPoint(0) + shift, c.GetEndPoint(1) + shift
                 d = b - a
                 if d.GetLength() < ft(20):

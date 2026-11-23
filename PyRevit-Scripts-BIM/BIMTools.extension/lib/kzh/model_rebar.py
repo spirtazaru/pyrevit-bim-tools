@@ -10,7 +10,7 @@ from collections import Counter
 
 from pyrevit import DB
 
-from kzh import element_name
+from kzh import element_name, params
 from kzh import drawing as kd
 from kzh import rebar as kr
 from kzh.geometry import mm
@@ -38,9 +38,15 @@ def _bar_curves(rb, i, acc):
     return curves
 
 
-def section(doc, host, point, along, level, near=1.0):
-    """Арматура основы в сечении: (стержни [(x, y, Ø)], контуры [[(x, y)]], сводка [строки]).
-    Координаты — мм в двух осях, кроме along. near — насколько далеко (футы) от сечения искать поперечные."""
+def _mark(rb):
+    p = rb.LookupParameter(params.PRM_MARK)
+    return (p.AsString() or u"") if p is not None else u""
+
+
+def section(doc, host, point, along, level, near=1.0, marks=False):
+    """Арматура основы в сечении: (стержни [(x, y, Ø)], контуры [(точки, Ø, форма)], сводка [строки]).
+    Координаты — мм в двух осях, кроме along. near — насколько далеко (футы) от сечения искать поперечные.
+    marks=True — у стержней и контуров последним элементом ещё марка АрмМарка (для чертежа)."""
     fr = Frame(point)
     other = [k for k in range(3) if k != along]
     bars, loops = [], []
@@ -75,8 +81,9 @@ def section(doc, host, point, along, level, near=1.0):
                     span_along = abs(b[along] - a[along])
                     span_cross = max(abs(b[k] - a[k]) for k in other)
                     if span_along > 3 * span_cross:
-                        bars.append((mm(a[other[0]] + t * (b[other[0]] - a[other[0]])),
-                                     mm(a[other[1]] + t * (b[other[1]] - a[other[1]])), d))
+                        bar = (mm(a[other[0]] + t * (b[other[0]] - a[other[0]])),
+                               mm(a[other[1]] + t * (b[other[1]] - a[other[1]])), d)
+                        bars.append(bar + (_mark(rb),) if marks else bar)
                         crossed += 1
             pts.append(fr.local(curves[-1].GetEndPoint(1)))
             flat = max(p[along] for p in pts) - min(p[along] for p in pts) < 0.2
@@ -87,7 +94,8 @@ def section(doc, host, point, along, level, near=1.0):
         if crossed:
             long_c[d] += crossed
         if best is not None:
-            loops.append((best[1], d, element_name(doc.GetElement(rb.GetShapeId()))))
+            loop = (best[1], d, element_name(doc.GetElement(rb.GetShapeId())))
+            loops.append(loop + (_mark(rb),) if marks else loop)
             trans_c[d] += 1
     summary = []
     if long_c:
@@ -114,7 +122,57 @@ def draw(canvas, outline, bars, loops, pad, size_text):
     return sk
 
 
-# Карточка «Арматура в модели» — вверху своей колонки, без выноски
+def layers(doc, host, horizontal):
+    """Сводка арматуры основы по слоям — для плит и стен, где сечение одной точкой не показать.
+    horizontal — основа горизонтальная (плита): стержни делятся на низ и верх по середине толщины;
+    для стены — на горизонтальные и вертикальные. Возвращает (строки сводки, id наборов)."""
+    box = host.get_BoundingBox(None)
+    z_mid = (box.Min.Z + box.Max.Z) / 2.0 if box is not None else 0.0
+    rows, ids = Counter(), []
+    for rid in kr.host_rebar_ids(host):
+        rb = doc.GetElement(rid)
+        if not isinstance(rb, ST.Rebar):
+            continue
+        ids.append(rid)
+        d = kr.bar_diameter_mm(doc.GetElement(rb.GetTypeId())) or 10.0
+        try:
+            n = rb.NumberOfBarPositions
+        except Exception:
+            n = 1
+        curves = _bar_curves(rb, 0, None)
+        main = max(curves, key=lambda c: c.Length)
+        v = main.GetEndPoint(1) - main.GetEndPoint(0)
+        z = sum(c.Evaluate(0.5, True).Z for c in curves) / len(curves)
+        if abs(v.Z) > 0.7 * v.GetLength():
+            where = u"вертикальные"
+        elif horizontal:
+            where = (u"низ" if z < z_mid else u"верх") + (u", вдоль X" if abs(v.X) >= abs(v.Y) else u", вдоль Y")
+        else:
+            where = u"горизонтальные"
+        step = None
+        if n > 1:
+            try:
+                step = int(round(mm(rb.MaxSpacing) / 5.0) * 5)
+            except Exception:
+                step = None
+        shape = element_name(doc.GetElement(rb.GetShapeId()))
+        rows[(where, d, step, shape)] += n
+    lines = []
+    for (where, d, step, shape), n in sorted(rows.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        lines.append(u"{}: ⌀{:.0f}{} — {} шт. ({})".format(
+            where, float(d), u" шаг {}".format(step) if step else u"", n, shape))
+    return lines, ids
+
+
+# Карточка «Сверка с моделью» для плит и стен: сводка по слоям и выделение наборов в модели
+PLANAR_CARD = ("model", "R", {
+    "title": u"Сверка с моделью",
+    "note": u"Только просмотр: какая арматура уже стоит у выбранного элемента. Модель не меняется.",
+    "rows": [[("button", "mdl_show", u"Показать арматуру модели"), ("button", "mdl_select", u"Выделить в модели")],
+             [("hint", "mdl")]]})
+
+
+# Карточка «Сверка с моделью» — вверху своей колонки, без выноски
 TARGET = (0.0, 0.0, False)
 
 
@@ -125,6 +183,7 @@ def stacked(editor):
     return out
 
 CARD = ("model", "R", {
-    "title": u"Арматура в модели",
-    "note": u"Показать сечение по арматуре, которая уже стоит в модели у выбранного элемента (а не по расчёту окна).",
+    "title": u"Сверка с моделью",
+    "note": u"Только просмотр: рисунок сечения по арматуре, которая уже стоит в модели у элемента "
+            u"(а не по расчёту окна). Модель не меняется.",
     "rows": [[("button", "mdl_show", u"Показать из модели")], [("hint", "mdl")]]})

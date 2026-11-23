@@ -36,6 +36,7 @@ from System.Windows.Controls.Primitives import ButtonBase
 from System.Windows.Markup import XamlReader
 from System.Windows.Interop import WindowInteropHelper
 from System.Diagnostics import Process
+import bimtools_window
 from Microsoft.Win32 import OpenFileDialog, SaveFileDialog
 from System.Windows.Forms import FolderBrowserDialog, DialogResult
 from pyrevit import revit, DB, forms
@@ -333,6 +334,7 @@ class ExportTask(NotifyBase):
     NwcVis = _notify_property('NwcVis')
     IfcVis = _notify_property('IfcVis')
     ViewVis = _notify_property('ViewVis')
+    on_change = None    # окно: обновить статус и кнопку запуска, когда у модели сменился путь RVT
 
     def __init__(self, rvt_path=u"", file_name=u"", nwc_folder=u"", ifc_folder=u"", view_name=u""):
         NotifyBase.__init__(self)
@@ -361,6 +363,8 @@ class ExportTask(NotifyBase):
         self._RvtPath = value
         self.raise_changed('RvtPath')
         self.refresh_auto_name()
+        if ExportTask.on_change is not None:
+            ExportTask.on_change()
 
     @property
     def FileName(self):
@@ -766,6 +770,60 @@ XAML_RESOURCES = u"""
             </Style.Triggers>
         </Style>
 
+        <!-- Всплывающие подсказки: светлая карточка с оранжевой рамкой, перенос длинного текста -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#FFFFFBF7"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="BorderBrush" Value="#99FF7A1A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="MaxWidth" Value="420"/>
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Галочки в стиле окна: скруглённый квадрат, оранжевая заливка при выборе, черта — «выбрано частично» -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#FF2B2118"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border Name="box" Width="18" Height="18" CornerRadius="5" Background="#E6FFFFFF" BorderBrush="#80FF7A1A" BorderThickness="1" VerticalAlignment="Center">
+                                <Grid>
+                                    <Path Name="mark" Data="M3.5,9 L7.5,13 L14.5,5.5" Stroke="White" StrokeThickness="2.2" Visibility="Hidden"/>
+                                    <Rectangle Name="part" Width="8" Height="2.4" Fill="White" Visibility="Hidden"/>
+                                </Grid>
+                            </Border>
+                            <ContentPresenter Name="text" VerticalAlignment="Center" Margin="8,0,0,0" RecognizesAccessKey="True"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Content" Value="{x:Null}"><Setter TargetName="text" Property="Margin" Value="0"/></Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FFFF7A1A"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#FF2B2118"/></Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="mark" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="{x:Null}">
+                                <Setter TargetName="box" Property="Background" Value="{StaticResource AccentGrad}"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="part" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="GlassCard" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource GlassFill}"/>
             <Setter Property="BorderBrush" Value="#80FFFFFF"/>
@@ -787,6 +845,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.9"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.75"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF2B2118"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -808,6 +868,8 @@ XAML_RESOURCES = u"""
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFFFFF"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FFFFEBD9"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FFFF7A1A"/><Setter TargetName="bd" Property="BorderThickness" Value="2"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.45"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1118,9 +1180,9 @@ __RESOURCES__
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="ЭКСПОРТ МОДЕЛИ" FontSize="11" FontWeight="Bold" Foreground="#FF8C7A6B" Margin="8,4,0,12"/>
                             <StackPanel Grid.Row="1">
-                                <RadioButton Name="navModels" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Модели и папки"/>
-                                <RadioButton Name="navSettings" GroupName="nav" Style="{StaticResource NavItem}" Content="Настройки экспорта"/>
-                                <RadioButton Name="navRun" GroupName="nav" Style="{StaticResource NavItem}" Content="Запуск и расписание"/>
+                                <RadioButton Name="navModels" ToolTip="Список моделей, формат, папки и имена файлов" GroupName="nav" IsChecked="True" Style="{StaticResource NavItem}" Content="Модели и папки"/>
+                                <RadioButton Name="navSettings" ToolTip="Параметры экспорта NWC и IFC — те же, что в окнах экспорта Revit" GroupName="nav" Style="{StaticResource NavItem}" Content="Настройки экспорта"/>
+                                <RadioButton Name="navRun" ToolTip="Запуск сейчас или в заданное время, открытие моделей, журнал" GroupName="nav" Style="{StaticResource NavItem}" Content="Запуск и расписание"/>
                             </StackPanel>
                             <Border Grid.Row="2" Background="#FFFDF4EA" BorderBrush="#40FF7A1A" BorderThickness="1" CornerRadius="14" Padding="12,10">
                                 <StackPanel>
@@ -1161,9 +1223,9 @@ __RESOURCES__
                                     <TextBlock Text="Модели для экспорта" FontSize="26" FontWeight="Bold"/>
                                     <TextBlock Text="Формат, общие папки и список моделей. Имя файла подставляется из имени RVT" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
-                                <ComboBox Name="cmbPresets" Grid.Column="1" Style="{StaticResource PillComboBox}" Tag="Пресет:" Width="240" Margin="12,0,8,0" VerticalAlignment="Center"/>
-                                <Button Name="btnSavePreset" Grid.Column="2" Content="Сохранить" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                                <Button Name="btnDeletePreset" Grid.Column="3" Content="Удалить" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
+                                <ComboBox Name="cmbPresets" ToolTip="Сохранённый набор: модели, папки, формат и время запуска" Grid.Column="1" Style="{StaticResource PillComboBox}" Tag="Пресет:" Width="240" Margin="12,0,8,0" VerticalAlignment="Center"/>
+                                <Button Name="btnSavePreset" ToolTip="Сохранить текущий список моделей и настройки как пресет" Grid.Column="2" Content="Сохранить" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                <Button Name="btnDeletePreset" ToolTip="Удалить выбранный пресет (с подтверждением)" Grid.Column="3" Content="Удалить" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
                             </Grid>
 
                             <!-- ВЫБОР РЕЖИМА -->
@@ -1176,11 +1238,11 @@ __RESOURCES__
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Orientation="Horizontal">
                                         <TextBlock Text="Формат:" FontWeight="Bold" VerticalAlignment="Center" Margin="4,0,12,0"/>
-                                        <RadioButton Name="rbModeNwc" GroupName="mode" Style="{StaticResource ModePill}" Content="NWC" IsChecked="True"/>
-                                        <RadioButton Name="rbModeIfc" GroupName="mode" Style="{StaticResource ModePill}" Content="IFC"/>
-                                        <RadioButton Name="rbModeBoth" GroupName="mode" Style="{StaticResource ModePill}" Content="NWC + IFC"/>
+                                        <RadioButton Name="rbModeNwc" ToolTip="Экспорт в Navisworks (.nwc)" GroupName="mode" Style="{StaticResource ModePill}" Content="NWC" IsChecked="True"/>
+                                        <RadioButton Name="rbModeIfc" ToolTip="Экспорт в IFC" GroupName="mode" Style="{StaticResource ModePill}" Content="IFC"/>
+                                        <RadioButton Name="rbModeBoth" ToolTip="Каждая модель выгружается и в NWC, и в IFC" GroupName="mode" Style="{StaticResource ModePill}" Content="NWC + IFC"/>
                                     </StackPanel>
-                                    <Button Name="btnGoSettings" Grid.Column="2" Content="Настройки экспорта →" Style="{StaticResource GlassButton}"/>
+                                    <Button Name="btnGoSettings" ToolTip="Открыть настройки выбранного формата" Grid.Column="2" Content="Настройки экспорта →" Style="{StaticResource GlassButton}"/>
                                 </Grid>
                             </Border>
 
@@ -1193,7 +1255,7 @@ __RESOURCES__
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <CheckBox Name="chkSameNwc" Content="Одна папка NWC для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <CheckBox Name="chkSameNwc" ToolTip="Все NWC — в одну папку; иначе папка задаётся у каждой модели" Content="Одна папка NWC для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <TextBox Name="txtSameNwc" Grid.Column="1" Style="{StaticResource PillTextBox}" IsEnabled="{Binding IsChecked, ElementName=chkSameNwc}"/>
                                         <Button Name="btnSameNwc" Grid.Column="2" Style="{StaticResource IconButton}" Content="..." Margin="8,0,0,0"
                                                 IsEnabled="{Binding IsChecked, ElementName=chkSameNwc}" ToolTip="Выбрать папку для NWC"/>
@@ -1204,7 +1266,7 @@ __RESOURCES__
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <CheckBox Name="chkSameIfc" Content="Одна папка IFC для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <CheckBox Name="chkSameIfc" ToolTip="Все IFC — в одну папку; иначе папка задаётся у каждой модели" Content="Одна папка IFC для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <TextBox Name="txtSameIfc" Grid.Column="1" Style="{StaticResource PillTextBox}" IsEnabled="{Binding IsChecked, ElementName=chkSameIfc}"/>
                                         <Button Name="btnSameIfc" Grid.Column="2" Style="{StaticResource IconButton}" Content="..." Margin="8,0,0,0"
                                                 IsEnabled="{Binding IsChecked, ElementName=chkSameIfc}" ToolTip="Выбрать папку для IFC"/>
@@ -1214,7 +1276,7 @@ __RESOURCES__
                                             <ColumnDefinition Width="300"/>
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
-                                        <CheckBox Name="chkSameView" Content="Одно имя 3D-вида для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <CheckBox Name="chkSameView" ToolTip="Один 3D-вид с этим именем во всех моделях; иначе имя задаётся у каждой модели" Content="Одно имя 3D-вида для всех моделей" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <TextBox Name="txtSameView" Grid.Column="1" Style="{StaticResource PillTextBox}" Width="280" HorizontalAlignment="Left"
                                                  IsEnabled="{Binding IsChecked, ElementName=chkSameView}"/>
                                     </Grid>
@@ -1223,6 +1285,11 @@ __RESOURCES__
 
                             <!-- СПИСОК МОДЕЛЕЙ: КАРТОЧКИ (ПОЛЯ ПАПОК И ВИДА ВИДНЫ, ЕСЛИ НЕ ЗАДАНЫ ОБЩИЕ) -->
                             <Border Grid.Row="3" Style="{StaticResource GlassCard}" Padding="12,12,6,12">
+                                <Grid>
+                                <StackPanel Name="spModelsEmpty" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed">
+                                    <TextBlock Text="Список моделей пуст" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="Нажмите «+ Добавить модель», загрузите список из CSV или выберите пресет" FontSize="13" Foreground="#FF8C7A6B" Margin="0,6,0,0" HorizontalAlignment="Center"/>
+                                </StackPanel>
                                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                                     <ItemsControl Name="icModels" Margin="0,0,6,0">
                                         <ItemsControl.ItemTemplate>
@@ -1239,7 +1306,7 @@ __RESOURCES__
                                                             <TextBox Grid.Column="1" Style="{StaticResource PillTextBox}" Text="{Binding RvtPath, Mode=TwoWay}"/>
                                                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
                                                                 <Button Style="{StaticResource IconButton}" Content="..." Tag="browse_rvt" ToolTip="Выбрать файл модели"/>
-                                                                <Button Style="{StaticResource RemoveButton}" Content="✕" Tag="remove" Margin="8,0,0,0"/>
+                                                                <Button Style="{StaticResource RemoveButton}" Content="✕" Tag="remove" Margin="8,0,0,0" ToolTip="Убрать модель из списка (файл не удаляется)"/>
                                                             </StackPanel>
                                                         </Grid>
                                                         <Grid Margin="0,0,0,8">
@@ -1286,6 +1353,7 @@ __RESOURCES__
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
                                 </ScrollViewer>
+                                </Grid>
                             </Border>
 
                             <Grid Grid.Row="4" Margin="4,14,4,0">
@@ -1296,9 +1364,9 @@ __RESOURCES__
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Name="tbModelsStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <Button Name="btnImportCsv" Grid.Column="1" Content="Импорт CSV" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnExportCsv" Grid.Column="2" Content="Экспорт CSV" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
-                                <Button Name="btnAddModel" Grid.Column="3" Content="+ Добавить модель" Style="{StaticResource GlassButton}"/>
+                                <Button Name="btnImportCsv" ToolTip="Загрузить список моделей из CSV (RVT, имя файла, папки, вид)" Grid.Column="1" Content="Импорт CSV" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnExportCsv" ToolTip="Сохранить список моделей в CSV — для правки в Excel" Grid.Column="2" Content="Экспорт CSV" Style="{StaticResource GlassButton}" Margin="0,0,8,0"/>
+                                <Button Name="btnAddModel" ToolTip="Добавить пустую карточку модели" Grid.Column="3" Content="+ Добавить модель" Style="{StaticResource GlassButton}"/>
                             </Grid>
                         </Grid>
 
@@ -1322,9 +1390,9 @@ __RESOURCES__
                                     <TextBlock Text="Настройки экспорта" FontSize="26" FontWeight="Bold"/>
                                     <TextBlock Text="Те же параметры, что в окнах экспорта NWC и IFC в Revit. Применяются ко всем моделям" FontSize="13" Foreground="#FF8C7A6B" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
-                                <Button Name="btnSettingsLoad" Grid.Column="1" Content="Загрузить из файла" Style="{StaticResource GlassButton}" Margin="12,0,8,0" VerticalAlignment="Center"/>
-                                <Button Name="btnSettingsSave" Grid.Column="2" Content="Сохранить в файл" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                                <Button Name="btnSettingsReset" Grid.Column="3" Content="По умолчанию" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
+                                <Button Name="btnSettingsLoad" ToolTip="Загрузить настройки NWC и IFC из файла" Grid.Column="1" Content="Загрузить из файла" Style="{StaticResource GlassButton}" Margin="12,0,8,0" VerticalAlignment="Center"/>
+                                <Button Name="btnSettingsSave" ToolTip="Сохранить настройки NWC и IFC в файл — для коллег и других проектов" Grid.Column="2" Content="Сохранить в файл" Style="{StaticResource GlassButton}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                <Button Name="btnSettingsReset" ToolTip="Вернуть настройки выбранного формата к значениям Revit по умолчанию" Grid.Column="3" Content="По умолчанию" Style="{StaticResource GlassButton}" VerticalAlignment="Center"/>
                             </Grid>
                             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="4,0,4,12">
                                 <RadioButton Name="rbTabNwc" GroupName="settingsTab" Style="{StaticResource ModePill}" Content="Настройки NWC" IsChecked="True"/>
@@ -1357,9 +1425,9 @@ __RESOURCES__
                                         <StackPanel>
                                             <TextBlock Text="Время запуска" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
                                             <StackPanel Orientation="Horizontal">
-                                                <RadioButton Name="rbNow" GroupName="runtime" Style="{StaticResource ModePill}" Content="Сейчас" IsChecked="True"/>
-                                                <RadioButton Name="rbLater" GroupName="runtime" Style="{StaticResource ModePill}" Content="Позже, в"/>
-                                                <TextBox Name="txtTime" Style="{StaticResource PillTextBox}" Text="23:00" Width="90"
+                                                <RadioButton Name="rbNow" ToolTip="Экспорт начнётся сразу после нажатия «Запустить экспорт»" GroupName="runtime" Style="{StaticResource ModePill}" Content="Сейчас" IsChecked="True"/>
+                                                <RadioButton Name="rbLater" ToolTip="Revit будет ждать указанного времени и до конца экспорта не будет отвечать" GroupName="runtime" Style="{StaticResource ModePill}" Content="Позже, в"/>
+                                                <TextBox Name="txtTime" ToolTip="Время запуска в формате ЧЧ:ММ, например 23:00" Style="{StaticResource PillTextBox}" Text="23:00" Width="90"
                                                          HorizontalContentAlignment="Center" IsEnabled="{Binding IsChecked, ElementName=rbLater}"/>
                                             </StackPanel>
                                             <Border Name="bdLaterWarning" Visibility="Collapsed" Margin="0,12,0,0" CornerRadius="12"
@@ -1379,11 +1447,11 @@ __RESOURCES__
                                                     <ColumnDefinition Width="240"/>
                                                 </Grid.ColumnDefinitions>
                                                 <TextBlock Text="Не загружать рабочие наборы, в имени которых есть:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                                <TextBox Name="txtWorksetKey" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
+                                                <TextBox Name="txtWorksetKey" ToolTip="Рабочие наборы с этим текстом в имени не загружаются (например, «связь»)" Grid.Column="1" Style="{StaticResource PillTextBox}"/>
                                             </Grid>
                                             <TextBlock Text="Например, «связь» — модели откроются без связей, экспорт пойдёт быстрее. Пустое поле — открыть все рабочие наборы."
                                                        FontSize="12" Foreground="#FF8C7A6B" TextWrapping="Wrap" Margin="0,6,0,12"/>
-                                            <CheckBox Name="chkCreateView" FontWeight="SemiBold" Content="Создавать временный 3D-вид, если вида с указанным именем нет"/>
+                                            <CheckBox Name="chkCreateView" ToolTip="Если вида нет, создаётся временный 3D-вид без линий и связей и удаляется после экспорта" FontWeight="SemiBold" Content="Создавать временный 3D-вид, если вида с указанным именем нет"/>
                                             <TextBlock Text="Временный вид скрывает линии и связи RVT и удаляется после экспорта — модели не изменяются."
                                                        FontSize="12" Foreground="#FF8C7A6B" TextWrapping="Wrap" Margin="22,4,0,0"/>
                                         </StackPanel>
@@ -1399,7 +1467,7 @@ __RESOURCES__
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
                                                 <TextBlock Name="tbLogDir" FontSize="12" Foreground="#FFC24E00" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                                                <Button Name="btnOpenLogDir" Grid.Column="1" Content="Открыть папку" Style="{StaticResource GlassButton}" Margin="12,0,0,0"/>
+                                                <Button Name="btnOpenLogDir" ToolTip="Открыть папку с журналами экспорта" Grid.Column="1" Content="Открыть папку" Style="{StaticResource GlassButton}" Margin="12,0,0,0"/>
                                             </Grid>
                                         </StackPanel>
                                     </Border>
@@ -1414,9 +1482,9 @@ __RESOURCES__
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Name="tbFooterStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold"/>
-                            <Button Name="btnCancel" Grid.Column="1" Content="Отмена" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
-                            <Button Name="btnRun" Grid.Column="2" Content="Запустить экспорт" Style="{StaticResource PrimaryButton}"/>
+                            <TextBlock Name="tbFooterStatus" Grid.Column="0" VerticalAlignment="Center" Foreground="#FF8C7A6B" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0"/>
+                            <Button Name="btnCancel" ToolTip="Закрыть окно без экспорта (Esc)" Grid.Column="1" Content="Отмена" Style="{StaticResource GlassButton}" Margin="0,0,10,0"/>
+                            <Button Name="btnRun" ToolTip="Проверить модели и папки и запустить экспорт" Grid.Column="2" Content="Запустить экспорт" Style="{StaticResource PrimaryButton}"/>
                         </Grid>
                     </Grid>
                 </Grid>
@@ -1435,9 +1503,11 @@ class ExportWindow(object):
         global dialog_owner
         dialog_owner = self.win
         try:
-            WindowInteropHelper(self.win).Owner = Process.GetCurrentProcess().MainWindowHandle
+            WindowInteropHelper(self.win).Owner = bimtools_window.revit_window_handle()
         except Exception:
             pass
+        # По размеру экрана, прежние размер и положение; окно модальное — Esc закрывает без экспорта
+        bimtools_window.setup(self.win, esc_closes=True)
         self.accepted = False
         self.selected_tasks = []
         self._suppress = False
@@ -1446,6 +1516,7 @@ class ExportWindow(object):
 
         self.tasks = ObservableCollection[object]()
         self.icModels.ItemsSource = self.tasks
+        ExportTask.on_change = self.update_status
         self.tasks.Add(self.new_task())
 
         self.build_settings_panel(self.spNwcSettings, nwc_settings, NWC_FIELDS)
@@ -1469,7 +1540,7 @@ class ExportWindow(object):
             'gridSameNwc', 'chkSameNwc', 'txtSameNwc', 'btnSameNwc',
             'gridSameIfc', 'chkSameIfc', 'txtSameIfc', 'btnSameIfc',
             'chkSameView', 'txtSameView',
-            'icModels', 'tbModelsStatus', 'btnImportCsv', 'btnExportCsv', 'btnAddModel',
+            'icModels', 'spModelsEmpty', 'tbModelsStatus', 'btnImportCsv', 'btnExportCsv', 'btnAddModel',
             'btnSettingsLoad', 'btnSettingsSave', 'btnSettingsReset', 'rbTabNwc', 'rbTabIfc', 'tbSettingsHint',
             'spNwcSettings', 'spIfcSettings',
             'rbNow', 'rbLater', 'txtTime', 'bdLaterWarning', 'txtWorksetKey', 'chkCreateView',
@@ -1583,6 +1654,12 @@ class ExportWindow(object):
         self.tbModelsStatus.Text = u"Моделей в списке: {} • Формат: {}".format(len(self.tasks), mode_title)
         when = u"в {}".format(self.txtTime.Text) if self.rbLater.IsChecked else u"сразу"
         self.tbFooterStatus.Text = u"Экспорт {} • моделей: {} • запуск {}".format(mode_title, count, when)
+        self.spModelsEmpty.Visibility = Visibility.Visible if len(self.tasks) == 0 else Visibility.Collapsed
+        # Без моделей запускать нечего: кнопка неактивна, причина — в строке статуса
+        self.btnRun.IsEnabled = count > 0
+        self.btnRun.Content = u"Запустить экспорт ({})".format(count) if count else u"Запустить экспорт"
+        if not count:
+            self.tbFooterStatus.Text = u"Укажите хотя бы одну модель RVT на вкладке «Модели и папки»"
 
     def pick_shared_folder(self, textbox, fmt):
         folder = pick_folder(u"Выберите папку для сохранения {} (для всех моделей)".format(fmt))
@@ -2307,6 +2384,10 @@ def run_export(tasks):
 # ==========================================================
 # 6. ЗАПУСК ПЛАГИНА
 # ==========================================================
-window = ExportWindow()
-if window.show():
-    run_export(window.selected_tasks)
+try:
+    window = ExportWindow()
+    if window.show():
+        run_export(window.selected_tasks)
+except Exception:
+    import traceback
+    show_message(u"Ошибка экспорта:\n{}".format(traceback.format_exc()), title=u"Ошибка")
