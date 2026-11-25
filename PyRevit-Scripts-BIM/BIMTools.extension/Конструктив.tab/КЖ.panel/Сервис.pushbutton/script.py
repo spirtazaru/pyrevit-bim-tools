@@ -496,6 +496,23 @@ def rerun_buttons(rows):
         show_message(u"Не удалось запустить кнопки армирования.", details=failed)
 
 
+def zoom_to(ids):
+    """Приближает активный вид к элементам (с запасом ~1 м). ShowElements не используется: при отсутствии
+    подходящего вида он открывает окно Revit «Невозможно подобрать подходящий вид»."""
+    view = uidoc.ActiveView
+    boxes = [b for b in (doc.GetElement(i).get_BoundingBox(view) or doc.GetElement(i).get_BoundingBox(None)
+                         for i in ids if doc.GetElement(i) is not None) if b is not None]
+    if not boxes:
+        return
+    pad = 3.0
+    lo = DB.XYZ(min(b.Min.X for b in boxes) - pad, min(b.Min.Y for b in boxes) - pad, min(b.Min.Z for b in boxes) - pad)
+    hi = DB.XYZ(max(b.Max.X for b in boxes) + pad, max(b.Max.Y for b in boxes) + pad, max(b.Max.Z for b in boxes) + pad)
+    for ui_view in uidoc.GetOpenUIViews():
+        if ui_view.ViewId == view.Id:
+            ui_view.ZoomAndCenterRectangle(lo, hi)
+            break
+
+
 def main():
     if doc.IsFamilyDocument:
         show_message(u"Откройте проект: сервис КЖ работает в проекте, а не в семействе.")
@@ -510,10 +527,7 @@ def main():
     win.show_modal()
     if win.show_ids:
         uidoc.Selection.SetElementIds(List[DB.ElementId](win.show_ids))
-        try:
-            uidoc.ShowElements(List[DB.ElementId](win.show_ids))
-        except Exception:
-            pass            # на текущем виде элементов нет — остаётся выделение
+        zoom_to(win.show_ids)
     if win.open_view is not None:
         uidoc.ActiveView = doc.GetElement(win.open_view)
     if win.update_rows:

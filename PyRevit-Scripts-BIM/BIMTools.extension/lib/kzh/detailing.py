@@ -25,6 +25,9 @@ TEXT_MM = 2.5           # высота текста на бумаге
 
 
 def _unique_view_name(doc, base):
+    # Revit не принимает в имени вида \ : { } [ ] | ; < > ? ` ~ — они бывают в именах типов колонн
+    for ch in u'\\:{}[]|;<>?`~':
+        base = base.replace(ch, u"-" if ch == u":" else u"")
     names = set(v.Name for v in DB.FilteredElementCollector(doc).OfClass(DB.View))
     if base not in names:
         return base
@@ -134,10 +137,9 @@ def _uniq(values, tol=1.0):
 def column_section_view(doc, column, scale=20):
     """Чертёжный вид «Сечение колонны» по арматуре колонны в модели (на середине высоты).
     Возвращает (вид или None, [замечания])."""
-    res = kg.column_section(column)
-    if isinstance(res, tuple):
-        return None, [res[1]]
-    sec = res
+    sec, err = kg.column_section(column)          # всегда пара: (сечение, None) или (None, причина)
+    if sec is None:
+        return None, [err]
     level = (sec.z_bot + sec.z_top) / 2.0
     bars, loops, _ = model_rebar.section(doc, column, sec.point, 2, level, marks=True)
     notes = []
@@ -252,6 +254,8 @@ def rebar_3d_view(doc, hosts, hide_concrete=False, margin_mm=300.0):
         box.Max = DB.XYZ(hi.X + m, hi.Y + m, hi.Z + m)
         view.SetSectionBox(box)
 
+    hide_view_frames(view)
+
     host_ids = set(el.Id.IntegerValue for el in hosts)
     rebar_ids = set()
     for el in hosts:
@@ -288,6 +292,22 @@ def rebar_3d_view(doc, hosts, hide_concrete=False, margin_mm=300.0):
     if hide_concrete:
         set_concrete_hidden(doc, view, True)
     return view, len(rebar_ids)
+
+
+def hide_view_frames(view):
+    """Скрывает на виде рамку подрезки (3D), границу кадрирования, оси, уровни и области видимости —
+    на виде армирования остаётся только арматура (подрезка при этом продолжает работать)."""
+    try:
+        view.CropBoxVisible = False
+    except Exception:
+        pass
+    for name in ("OST_SectionBox", "OST_Levels", "OST_Grids", "OST_VolumeOfInterest", "OST_CLines"):
+        try:
+            cid = DB.ElementId(getattr(DB.BuiltInCategory, name))
+            if view.CanCategoryBeHidden(cid):
+                view.SetCategoryHidden(cid, True)
+        except Exception:
+            pass
 
 
 def view_hosts(doc, view):
